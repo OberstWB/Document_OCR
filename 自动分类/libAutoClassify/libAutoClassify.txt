@@ -1,0 +1,49 @@
+/// =============================================================================
+/// <							自动分类算法										>
+/// <--------------------------------------------------------------------------->
+/// <	创建作者: wangbo															>
+/// <	创建时间: 2017-10-26														>
+/// <	算法版本: v1.0.0.1														>
+/// <	版本说明: 详见 "libAutoClassify.cpp"										>
+/// =============================================================================
+
+#pragma once
+#ifdef LIBAUTOCLASSIFY_EXPORTS
+#define DLL_API extern "C" __declspec(dllexport)
+#else
+#define DLL_API extern "C" __declspec(dllimport)
+#endif
+
+/// =============================================================================
+/// <自动分类初始化函数>
+/// <enginePath = 识别引擎模型文件路径>
+/// <lic_path = license授权文件全路径，如无设为空即可>
+/// <xmlStrateFile = 策略文件路径>
+/// <datPath = 与策略文件对应的模板路径,即策略文件所在路径>
+DLL_API long icvAutoClassify_init_handle(const char* enginePath, const char* lic_path, const char* xmlStrategyFile, const char* datPath = NULL);
+
+/// <对输入图像进行自动分类>
+/// <根据候选集对输入图像进行自动分类>
+/// <handle = 自动分类引擎句柄>
+/// <data = 待分类图像数据流信息>
+/// <len = 待分类图像数据流长度>
+/// <pcCandiList = 候选分类类别，可以默认为空，即全员参与分类，外部开辟空间>
+/// <nCandiList = 候选分类类别个数>
+/// <result = 分类结果，外部开辟空间，建议至少1024>
+/// <基于数据流的自动分类>
+DLL_API int icvAutoClassify_form(long handle, const char* data, int len, const int* pcCandiList, int nCandiList, char* result);
+
+/// <自动分类句柄释放函数>
+/// <自动分类引擎释放>
+/// <handle = 分类句柄>
+DLL_API void icvAutoClassify_uninit(long& handle);
+
+/// =============================================================================
+/// <下面这些代码的作用：lib自包含，避免不同工程添加该dll时均需添加如下代码>
+#ifndef LIBAUTOCLASSIFY_EXPORTS
+#ifdef _DEBUG
+#pragma comment(lib, "libAutoClassifyD.lib")
+#else
+#pragma comment(lib, "libAutoClassify.lib")
+#endif
+#endif

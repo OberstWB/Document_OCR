@@ -1,0 +1,35 @@
+#ifndef _LIB_THRESH_H_
+#define _LIB_THRESH_H_
+
+namespace iThresh{
+
+	/// 采用otsu方法对固定点计算阈值
+	float getOtsuThresh(Mat gray, vector<Point> vPoint);
+
+	/// 参考opencv thresh形参对固定点进行二值化
+	void OtsuPart(Mat src, Mat& bw, vector<Point> vPoint, float thresh, int maxval, int type);
+
+	// 全局二值化方法
+	bool Binarization_BGT(Mat src, Mat &dst, float fDeltaT);
+	void Binarization_SDLC(Mat &src, Mat &dst);
+	bool Binarization_Tri(Mat src, Mat& dst);
+	bool Binarization_Yen(Mat src, Mat &dst);
+	bool Binarization_Den(Mat &tInOutImage);
+
+	// 局部二值化方法
+	bool Binarization_Sauvola(Mat src, Mat& dst, int nWinWidth, int nWinHeight, double k = 0.5, int nDivideR = 128);
+	bool Binarization_Wolf(Mat src, Mat &dst, int nWinWidth, int nWinHeight, double k = 0.5, int R = 128);
+	bool Binarization_Niblack(Mat src, Mat& dst, int nWinWidth, int nWinHeight,double k = -0.2);
+	bool Binarization_Nick(Mat src, Mat &dst, int nWinWidth, int nWinHeigh, double k = -0.2);
+	bool Binarization_Gatos(Mat src, Mat& dst,int nWinWidth, int nWinHeight, double Q);
+	bool Binarization_Bernsen(Mat src, Mat &dst, int nWinWidth, int nWinheight);
+	bool Binarization_Feng(Mat src, Mat &dst, int nWinWidth, int nWinHeight);
+	bool Binarization_Nokia(Mat &src, Mat &dst, int nWin, int nThresh = 20);
+	bool Binarization_LMM(Mat src, Mat &dst,int nWinWidth);
+	bool Binarization_OstuNiblack(Mat src, Mat &dst);
+	//bool Binarization_LOF(Mat src, Mat &dst);
+
+	void Binarization_ostu_niblack(Mat src, Mat &dst);
+}
+
+#endif

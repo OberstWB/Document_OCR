@@ -1,0 +1,62 @@
+#ifndef _LIB_RECOG_TEXT_H_
+#define _LIB_RECOG_TEXT_H_
+
+#include "libTableFormRecognition.h"
+
+namespace iRecogText{
+
+	typedef struct _tagTableFormEngine{
+		/// 1 pntr识别引擎
+		long lOcrHandle;
+
+		/// 2 图像质量评判
+		int  bUseQuality;
+		long lQulityHandle;
+
+		/// 3 文字方向调整
+		int  bUseTextDirAdjust;
+
+		/// 4 文字校对(针对报表采用固定字典进行校对)
+		int  bUseTextDic;
+		vector<string> vStrDic;
+
+		/// 引擎初始化
+		_tagTableFormEngine(){
+			this->lOcrHandle = 0;
+			this->bUseQuality = 0;
+			this->lQulityHandle = 0;
+			this->bUseTextDirAdjust = 0;
+			this->bUseTextDic = 0;
+			this->vStrDic = vector<string>(0);
+		}
+	}iTableFormEngine;
+
+	//typedef struct _tagTableFormCell{
+	//	int top;
+	//	int lef;
+	//	int bot;
+	//	int rig;
+	//	string ocrResult;
+	//	float fConfidence;
+	//}iTableFormCell;
+
+	const string num_str = "0123456789.-oOIBb|l";
+	
+	/// 针对表单的行切分识别引擎
+	void lineOCR(long handle, Mat grayImg, iTableFormCell& cellResult);
+
+	/// 根据二值图像判断是否具有字符
+	bool CheckIfTextByBwImage(Mat bwImg, float fThres = 0.3);
+
+	/// 判断是否具有纹理信息
+	bool have_black_text_check(const Mat &gray, Mat &bw, int min_val);
+
+	bool getValidTextRegion(Mat src, int &nLeft, int &nRight, int &nTop, int &nBottom);
+
+	void checkTextDir(long handle, Mat& gray, Mat& bwImg, vector<Rect>& vCellRect);
+	//字典比对
+	
+}
+
+int getNearestAtomFrmDic(vector<string> vStr, string atom, int &nIndex);
+#endif

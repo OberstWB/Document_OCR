@@ -1,0 +1,18 @@
+#ifndef _ICV_CALC_KEYWORD_FTR_H_
+#define _ICV_CALC_KEYWORD_FTR_H_
+
+
+/// <>
+long icvInitOcrHandle(string modelPath);
+
+/// 中文识别引擎
+void icvGetRoiImageStr(long handle, Mat roiMat, int hh, vector<vector<string>>&arrStr, bool bOri = true);
+
+/// 英文识别引擎
+bool icvGetRoiImageStrEng(long handle, Mat roiMat, vector<vector<string>>& arrStr);
+
+
+/// 
+void icvUnInitOcrHandle(long& handle);
+
+#endif

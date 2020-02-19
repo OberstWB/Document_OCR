@@ -1,0 +1,30 @@
+// 下列 ifdef 块是创建使从 DLL 导出更简单的
+// 宏的标准方法。此 DLL 中的所有文件都是用命令行上定义的 LIBALLENGINE_EXPORTS
+// 符号编译的。在使用此 DLL 的
+// 任何其他项目上不应定义此符号。这样，源文件中包含此文件的任何其他项目都会将
+// LIBALLENGINE_API 函数视为是从 DLL 导入的，而此 DLL 则将用此宏定义的
+// 符号视为是被导出的。
+#ifdef LIBALLENGINE_EXPORTS
+#define LIBALLENGINE_API __declspec(dllexport)
+#else
+#define LIBALLENGINE_API __declspec(dllimport)
+#endif
+
+#include "mIvCommon.h"
+
+enum
+{
+	CHAR_LINE,	// 行切分识别
+	CHAR_LICR,	// 小写金额识别引擎
+	CHAR_UICR,	// 大写金额识别引擎
+	CHAR_RICR,	// 手写中文识别引擎
+	CHAR_DICR,	// 手写汉字识别引擎
+};
+
+LIBALLENGINE_API long AllEngine_Init(const char* path);
+
+LIBALLENGINE_API int  AllEngine_Classify(long handle, int nType, const Mat &tBw, string &ResStr,int &conf, int iDigitNum = 1);
+
+LIBALLENGINE_API int FieldClassify(long handle, const Mat tBw, vector<string>& vStrResult, int& conf);
+
+LIBALLENGINE_API void AllEngine_UnInit(long& handle);

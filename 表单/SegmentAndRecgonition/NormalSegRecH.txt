@@ -1,0 +1,42 @@
+/******************************************************************
+
+*******************************************************************/
+#ifndef NormalSegRec_h
+#define NormalSegRec_h
+
+#include "stdafx.h"
+#include "SegRecComm.h"
+using namespace SegRecComm;
+
+
+namespace SegAndRec_table_ocr
+{
+	typedef struct  
+	{
+		int iPixelTh;
+		double dbRatioTh;
+		long lMaxDist;
+		double lDistRatio;
+		long lMaxHigh;
+		long lMaxWidth;
+		bool bDebug;
+
+}stLineSegmentationParam;
+
+void SegmentLine(long handle, int iType, MyOcrEngine p,Mat &tImage,Mat &tBw,RECTS &tRects,stOcrRectList &tOcrRectList);
+void SegmentLine(long handle, int iType,MyOcrEngine p, Mat &tImage,Mat &tBw,stOcrRectList &tOcrRectList);
+void ConnComponent(Mat &tBw,int iPixelTh,RECTS &tRects);
+void MergeOverlap(long handle, int iType,MyOcrEngine p, Mat &tBw,const RECTS &tRects,double dbRatioTh,RECTS &tMergedRects);
+void WeightedGraph(long handle, int iType, MyOcrEngine p,Mat &tImage,Mat &tBw,const RECTS &tRects,double dbRatioTh,Mat &G,Mat &W,Mat &CM,Mat &Labels,Mat &DMIN);
+bool initialSegmentationParam(stLineSegmentationParam &m_tLineSegmentationParam);
+bool Process(Mat &tImage,Mat &tBwImage,Mat &tConnBwImage,RECTS &tRects);
+void Ascii2WideString( const string& szStr, wstring& wszStr );
+void DrawBoxes( Mat &tImage,const RECTS &tRects,int iGray = 127);
+void SegmentAllRect(long handle, int iType, MyOcrEngine p,Mat &tImage,Mat &tBw,RECTS &tRects,stOcrRectList &tOcrRectList);
+bool ProcessTaxType(Mat &tImage,Mat &tBwImage,RECTS &tRects);
+//使用IdCardOCR_v3.0后的部分需要改动的接口，其余不涉及MyOcrEngine的与OcrEngine接口通用
+void SegmentLine_ID(long handle, int iType, /*MyOcrEngine p,*/Mat &tImage,Mat &tBw,RECTS &tRects,stOcrRectList &tOcrRectList);
+void MergeOverlap_ID(long handle, int iType,/*MyOcrEngine p,*/Mat& tGray, Mat &tBw,const RECTS &tRects,double dbRatioTh,RECTS &tMergedRects);
+void WeightedGraph_ID(long handle, int iType, /*MyOcrEngine p,*/Mat &tImage,Mat &tBw,const RECTS &tRects,double dbRatioTh,Mat &G,Mat &W,Mat &CM,Mat &Labels,Mat &DMIN);
+}
+#endif

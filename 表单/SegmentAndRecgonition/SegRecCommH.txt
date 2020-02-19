@@ -1,0 +1,130 @@
+#ifndef ocrComm_H
+#define ocrComm_H
+
+#include <list>
+typedef basic_string<TCHAR, char_traits<TCHAR>,allocator<TCHAR> > tstring;
+namespace SegRecComm
+{
+	typedef struct  
+	{
+		double x,y;
+
+	}SHAPE_POINT;
+
+	typedef struct  
+	{
+		SHAPE_POINT P1;
+		SHAPE_POINT P2;
+
+		double dbLen;
+		double dbLineWidth;
+
+		double dbRo;                    //相对 (0,0)坐标
+		double dbAngle;
+	}SHAPE_LINE;
+
+	typedef vector<SHAPE_LINE> LINES;
+
+	typedef struct
+	{
+		SHAPE_POINT tTopLeft;
+		SHAPE_POINT tButtomRight;
+
+	}SHAPE_RECT;
+
+	typedef vector<SHAPE_RECT> RECTS;
+
+
+	typedef vector<RECTS> stMultiLineCutedRects;
+
+
+	// P1--------P2
+	// |         |
+	// |         |
+	// P4--------P3
+	typedef struct
+	{
+		SHAPE_POINT tP1;
+		SHAPE_POINT tP2;
+		SHAPE_POINT tP3;
+		SHAPE_POINT tP4;
+
+	}ANGLE_RECT;
+
+
+	typedef vector<ANGLE_RECT> ANGLE_RECTS;
+
+	typedef bool (*MyOcrEngine)(long hHandle,int iType,const Mat &tBwChar,tstring &strChar,long dmin[10]);
+
+	typedef struct   //识别参数接口，识别器的选取
+	{
+		int ihandle;
+		int iOcrType;//识别接口的type
+		MyOcrEngine fun;
+	}stOCR;
+
+	typedef struct     //最终输出结果的结构，无多备选字符
+	{
+		tstring keyName;
+		tstring result;
+		vector<SHAPE_RECT> rects;
+		vector<double>confi;
+	}outResult;
+
+	typedef struct
+	{
+		long ihandle;//后处理的识别句柄
+		int ocrType;//后处理识别的type类型
+		tstring tPriorInfor; //预知的先验信息
+	}stPostParam;
+
+	typedef struct ////每个SHAPE_RECT的识别结果
+	{
+
+		SHAPE_RECT imgRect;  /////图像区域
+		tstring strResult;/////识别结果（多个备选，每个备选一个字符）
+		vector<double> dbConfi;//////每个备选的置信度
+
+	}OcrRectResult;
+
+	typedef struct ////行识别结果
+	{
+		vector<OcrRectResult> vecOcrRectResult; /////每个区域的识别结果组成一个vector
+
+	}LineOcrResult;
+
+
+	typedef struct  
+	{
+		SHAPE_RECT tRect;
+		tstring    strOcrResult;
+		double     dbConfidence;
+		long       lDist;
+		long       lDmin[10];
+		//int         labels;
+
+	}stOcrRect;
+
+	typedef vector<stOcrRect> stOcrRectList;
+	//typedef vector<stOcrRectList> stOcrLineList;//定义冲突，且没用上
+	typedef vector<LineOcrResult> stOcrLineList;
+
+	typedef struct  
+	{
+		OcrRectResult tOcrRect;
+		int iPos;
+
+	}stInsertOcrRect;
+	typedef list<stInsertOcrRect> stInsertOcrRectList;
+	/***/
+	typedef struct
+	{
+		SHAPE_RECT tRect;
+		list<vector<Point>> tContours;
+
+	}stRectContour;
+
+	typedef list<stRectContour> stContourRects;
+}
+
+#endif

@@ -1,0 +1,644 @@
+// LineSegment.cpp : 定义 DLL 应用程序的导出函数。
+//
+
+#include "stdafx.h"
+#include "LineSegment.h"
+
+typedef vector<Rect> RECTS;
+
+void DeleteEmptyCutRect(RECTS &tCutRect, const Mat &tBwImg, int iNonZeroThreshold) {
+	RECTS tRtnRects;
+	for (int i = 0; i < (int)tCutRect.size(); i++) {
+		Mat tTemp = tBwImg(tCutRect.at(i));
+		int iNonZero = countNonZero(tTemp);
+
+		if (iNonZero >= iNonZeroThreshold) {
+			tRtnRects.push_back(tCutRect.at(i));
+		}
+	}
+
+	tCutRect.clear();
+	tCutRect = tRtnRects;
+	return;
+}
+
+class cRECTSMeanWidth
+{
+private:
+	long sum;
+	long num;
+
+public:
+	cRECTSMeanWidth () : num(0), sum(0) {}
+
+	void operator() (cv::Rect tRect)
+	{
+		num++;
+		sum += tRect.width;
+	}
+
+	double value ()
+	{
+		return (static_cast<double>(sum)/static_cast<double>(num));
+	}
+
+};
+
+void CalculateRectImgLeftRightZeroColNum(const Mat &tRectImg, int &iLeftZeroColNum, int &iRightZeroColNum) {
+	uchar *pD_tRectImg = NULL;
+	iLeftZeroColNum = -1;
+	iRightZeroColNum = -1;
+
+	for (int j = 0; j < tRectImg.cols && (iLeftZeroColNum == -1); j++) {
+		for (int i = 0; i < tRectImg.rows && (iLeftZeroColNum == -1); i++) {
+			pD_tRectImg = (uchar *)tRectImg.ptr<uchar>(i);
+			if (pD_tRectImg[j] != 0) {
+				iLeftZeroColNum = j;
+				break;
+			}
+		}
+	}
+
+	for (int j = tRectImg.cols - 1; j >= 0 && (iRightZeroColNum == -1); j--) {
+		for (int i = 0; i < tRectImg.rows && (iRightZeroColNum == -1); i++) {
+			pD_tRectImg = (uchar *)tRectImg.ptr<uchar>(i);
+			if (pD_tRectImg[j] != 0) {
+				iRightZeroColNum = tRectImg.cols - 1 - j;
+				break;
+			}
+		}
+	}
+
+	if (iLeftZeroColNum == -1) {
+		iLeftZeroColNum = 0;
+	}
+	if (iRightZeroColNum == -1) {
+		iRightZeroColNum = 0;
+	}
+}
+
+void Utility_GaussSmoothArray(vector<double> &tArray,int iWin,vector<double> &tOutArray) {
+	if (tArray.size() < iWin) {
+		return;
+	}
+	int W = iWin/2;
+	Mat kernel = getGaussianKernel(iWin,1);
+	tOutArray.resize(tArray.size(),0);
+
+	for (unsigned int i=W; i<tArray.size()-W; i++) {
+		for (int j=-W; j<=W; j++) {
+			tOutArray[i] += tArray[i+j]*kernel.at<double>(j+W);
+		}
+		//tOutArray[i] /= 2*W + 1;
+	}
+}
+
+void Utility_Profile(const Mat &tBwImage,vector<double> &tProfile) {
+	int iWidth,iHeight;
+	iWidth = tBwImage.cols;
+	iHeight = tBwImage.rows;
+
+	vector<double> tTopProfile(iWidth),tBottomProfile(iWidth);
+
+	for (int i=0; i<iWidth; i++ ) {
+		tTopProfile[i]    = 0;
+		tBottomProfile[i] = 0;
+		
+		for (int j=0; j<iHeight; j++ ) {
+			if ( tBwImage.at<uchar>(j,i) == 0 ) {
+				tTopProfile[i]++;
+			} else {
+				break;
+			}
+		}//for ( j=0; j<iHeight; j++ )
+
+		for (int j=iHeight-1; j>0; j-- ) {
+			if ( tBwImage.at<uchar>(j,i) == 0 ) {
+				tBottomProfile[i]++;
+			} else {
+				break;
+			}
+		}//for ( j=iHeight-1; j>0; j-- )		
+	}//for ( i=0; i<iWidth; i++ )
+
+	vector<double> tTopProfiles(iWidth),tBottomProfiles(iWidth);
+	Utility_GaussSmoothArray(tTopProfile,5,tTopProfiles);
+	Utility_GaussSmoothArray(tBottomProfile,5,tBottomProfiles);
+	tProfile.resize(iWidth);
+
+	for ( int i=0; i<iWidth; i++ ) {
+		tProfile[i] = tTopProfiles[i]+tBottomProfiles[i];
+	}
+
+	return;
+}
+
+void Utility_Supression(const vector<double> &tArray,int iWin,vector<double> &tOutArray) {
+	int halfWnd = iWin / 2;
+	double supVal = 0;
+	int len = tArray.size();
+	vector<double> dst(len);
+	vector<double> src;
+	src = tArray;
+
+	int maxInd = 1;
+	int i = 0;
+	int e;
+	while(i < len) {
+		if ( maxInd < (i - halfWnd) ) {
+			maxInd = i - halfWnd;
+		}
+
+		e = MIN((i + halfWnd), len-1);
+		while(maxInd <= e) {
+			if (src[maxInd] > src[i]) {
+				break;
+			} else {
+				dst[maxInd] = supVal;
+			}
+			maxInd = maxInd + 1;
+		}
+
+		if (maxInd > e) {
+			dst[i] = src[i]; 
+			maxInd = i+1;
+			i = i + halfWnd;
+		} else {
+			dst[i] = supVal;
+		}
+
+		i = i + 1;
+
+	}//	 while(i <= len)
+
+	tOutArray = dst;
+	return;
+}
+
+#define BEGIN_SEARCH        (6)
+#define MIN_WIDTH          (7)
+bool LineSegRec_CutByProfile(const Mat & tBwImage,RECTS &tRects) {
+	int iWidth,iHeight;
+	int iWin = 7;
+	iWidth = tBwImage.cols;
+	iHeight = tBwImage.rows;
+
+	vector<double> tProfile,tProfiles;
+
+	Utility_Profile(tBwImage,tProfile);	
+	Utility_Supression(tProfile,iWin,tProfiles);
+
+	if ( tProfile.size() < 2*BEGIN_SEARCH ) {
+		return false;
+	}
+
+	Rect tRect;
+	vector<double>::iterator pos = max_element(tProfiles.begin()+BEGIN_SEARCH, tProfiles.end()-BEGIN_SEARCH);
+	int iThred = int( double(*pos) * 0.5 );
+	if ( 0 == iThred )
+	{
+		return false;
+	}
+
+	int iStart = 0;
+	bool bRet = false;
+
+	for (int i=0; i<tProfiles.size(); i++ ) {
+		if((iWidth - i) < MIN_WIDTH) {
+			tRect.x = iStart;
+			tRect.y = 0;
+			tRect.width = iWidth-1 - tRect.x + 1;
+			tRect.height = iHeight-1 - tRect.y + 1;
+			tRects.push_back(tRect);
+			break;
+		}
+
+		if( (tProfiles[i]>iThred)&&((i-iStart) > MIN_WIDTH)) {
+			tRect.x = iStart;
+			tRect.y = 0;
+			tRect.width = i - tRect.x + 1;
+			tRect.height = iHeight-1 - tRect.y + 1;
+			tRects.push_back(tRect);
+			iStart = i+1;
+		}
+	}//for ( i=0; i<tSegments.size(); i+=2 )
+
+	return true;
+}
+
+LINESEGMENT_API bool LINESEGMENT_SegmentByProfile(const Mat &tBwImg, vector<cv::Rect> &tCutRects)
+{
+	Mat tElement = Mat::ones(3, 3, CV_8UC1);
+	Mat tTestDilate;
+	Mat tTestErode ;
+	dilate(tBwImg, tTestDilate, tElement);	
+	erode(tTestDilate, tTestErode, tElement);
+
+	RECTS tCutRect;
+	if (!LineSegRec_CutByProfile(tTestErode, tCutRect)) {
+		tCutRects.clear();
+		return false;
+	}
+	DeleteEmptyCutRect(tCutRect, tTestErode, 5);	
+
+	cRECTSMeanWidth mMeanWidth = for_each(tCutRect.begin(), tCutRect.end(), cRECTSMeanWidth());
+	double dbMeanWidth = mMeanWidth.value();
+
+	int iWidthMinThre = (int)(dbMeanWidth/2.);
+
+	tCutRects.push_back(tCutRect.front());
+
+	for (int i = 1; i < (int)tCutRect.size() - 1; i++)
+	{
+		if (tCutRect.at(i).width < iWidthMinThre)
+		{
+			int iCurrDisFromLeft = tCutRect.at(i).x - tCutRect.at(i-1).br().x;
+			int iCurrDisFromRight = tCutRect.at(i+1).x - tCutRect.at(i).br().x;
+
+			int iLeftWidth = tCutRect.at(i-1).width;
+			int iRightWidth = tCutRect.at(i+1).width;
+
+			int iCurrLeftZeroColNum = int();
+			int iCurrRightZeroColNum = int();
+			CalculateRectImgLeftRightZeroColNum(tBwImg(tCutRect.at(i)), iCurrLeftZeroColNum, iCurrRightZeroColNum);
+
+			if (iCurrDisFromLeft > iWidthMinThre && iCurrDisFromRight > iWidthMinThre)
+			{
+				tCutRects.push_back(tCutRect.at(i));
+				continue;
+			}
+			else if (iCurrDisFromLeft <= iWidthMinThre && iCurrDisFromRight > iWidthMinThre)
+			{
+				if (iLeftWidth >= (int)dbMeanWidth)
+				{
+					tCutRects.push_back(tCutRect.at(i));
+					continue;
+				}
+				else
+				{
+					if (iCurrLeftZeroColNum < iCurrRightZeroColNum)
+					{
+						tCutRects.pop_back();
+						cv::Rect tMergeRect(cv::Point(tCutRect.at(i-1).x, tCutRect.at(i-1).y), cv::Point(tCutRect.at(i).br().x, tCutRect.at(i).br().y));
+						tCutRects.push_back(tMergeRect);
+					}
+					else
+					{
+						tCutRects.push_back(tCutRect.at(i));
+						continue;
+					}
+				}
+			}
+			else if (iCurrDisFromLeft > iWidthMinThre && iCurrDisFromRight <= iWidthMinThre)
+			{
+				if (iRightWidth >= (int)dbMeanWidth)
+				{
+					tCutRects.push_back(tCutRect.at(i));
+					continue;
+				}
+				else
+				{
+					if (iCurrLeftZeroColNum > iCurrRightZeroColNum)
+					{
+						cv::Rect tMergeRect(cv::Point(tCutRect.at(i).x, tCutRect.at(i).y), cv::Point(tCutRect.at(i+1).br().x,tCutRect.at(i+1).br().y));
+						tCutRects.push_back(tMergeRect);
+						i += 1;
+					}
+					else
+					{
+						tCutRects.push_back(tCutRect.at(i));
+						continue;
+					}
+				}
+			}
+			else if (iCurrDisFromLeft <= iWidthMinThre && iCurrDisFromRight <= iWidthMinThre)
+			{
+				if (iLeftWidth <= (int)dbMeanWidth && iRightWidth <= (int)dbMeanWidth)
+				{
+					if (iCurrLeftZeroColNum < iCurrRightZeroColNum)
+					{
+						tCutRects.pop_back();
+						cv::Rect tMergeRect(cv::Point(tCutRect.at(i-1).x, tCutRect.at(i-1).y), cv::Point(tCutRect.at(i).br().x, tCutRect.at(i).br().y));
+						tCutRects.push_back(tMergeRect);
+					}
+					else if (iCurrLeftZeroColNum > iCurrRightZeroColNum)
+					{
+						cv::Rect tMergeRect(cv::Point(tCutRect.at(i).x, tCutRect.at(i).y), cv::Point(tCutRect.at(i+1).br().x,tCutRect.at(i+1).br().y));
+						tCutRects.push_back(tMergeRect);
+						i += 1;
+					}
+					else
+					{
+						if (iLeftWidth > iRightWidth)
+						{
+							cv::Rect tMergeRect(cv::Point(tCutRect.at(i).x, tCutRect.at(i).y), cv::Point(tCutRect.at(i+1).br().x,tCutRect.at(i+1).br().y));
+							tCutRects.push_back(tMergeRect);
+							i += 1;
+						}
+						else if (iLeftWidth < iRightWidth)
+						{
+							tCutRects.pop_back();
+							cv::Rect tMergeRect(cv::Point(tCutRect.at(i-1).x, tCutRect.at(i-1).y), cv::Point(tCutRect.at(i).br().x, tCutRect.at(i).br().y));
+							tCutRects.push_back(tMergeRect);
+						}
+						else
+						{
+							tCutRects.push_back(tCutRect.at(i));
+							continue;
+						}
+					}
+				}
+				else if (iLeftWidth <= (int)dbMeanWidth && iRightWidth > (int)dbMeanWidth)
+				{
+					if (iCurrLeftZeroColNum < iCurrRightZeroColNum)
+					{
+						tCutRects.pop_back();
+						cv::Rect tMergeRect(cv::Point(tCutRect.at(i-1).x, tCutRect.at(i-1).y), cv::Point(tCutRect.at(i).br().x, tCutRect.at(i).br().y));
+						tCutRects.push_back(tMergeRect);
+					}
+					else
+					{
+						tCutRects.push_back(tCutRect.at(i));
+						continue;
+					}
+				}
+				else if (iLeftWidth > (int)dbMeanWidth && iRightWidth <= (int)dbMeanWidth)
+				{
+					if (iCurrLeftZeroColNum > iCurrRightZeroColNum)
+					{
+						cv::Rect tMergeRect(cv::Point(tCutRect.at(i).x, tCutRect.at(i).y), cv::Point(tCutRect.at(i+1).br().x,tCutRect.at(i+1).br().y));
+						tCutRects.push_back(tMergeRect);
+						i += 1;
+					}
+					else
+					{
+						tCutRects.push_back(tCutRect.at(i));
+						continue;
+					}
+				}
+				else
+				{
+					tCutRects.push_back(tCutRect.at(i));
+					continue;
+				}
+			}
+			else
+			{
+				tCutRects.push_back(tCutRect.at(i));
+				continue;
+			}
+
+		}
+		else
+		{
+			tCutRects.push_back(tCutRect.at(i));
+		}
+	}
+
+	if (tCutRect.back() == tCutRects.back())
+	{
+		return true;
+	}
+	else
+	{
+		tCutRects.push_back(tCutRect.back());
+	}
+
+	//tCutRects.clear();
+	//tCutRects = tCutRect;
+	//Utility_ShowRects(tTestErode, tCutRects, "F:\\测试图像\\bw\\Field\\field", "Finally_Segment", true);
+
+	return true;
+
+}
+
+bool CmpVectorByXAscend(Point pt1, Point pt2) {
+	return (pt1.x < pt2.x);
+}
+
+bool CmpVectorByWidthAscend(Rect r1, Rect r2) {
+	return (r1.width < r2.width);
+}
+
+void Utility_VerticalProjection(const Mat &tBwImage,vector<double> &tProj)
+{
+	const int W = 2;
+
+	vector<double> colSum(tBwImage.cols),colSumFilter(tBwImage.cols);
+
+	for (int i=0; i<tBwImage.cols; i++)
+	{
+		colSum[i] = (int)sum(tBwImage.col(i))[0];
+
+		colSum[i] = colSum[i] / 255;
+	}
+
+	// 平滑投影结果
+	for (int i=W; i<tBwImage.cols-W; i++)
+	{
+		for (int j=-W; j<=W; j++)
+		{
+			colSumFilter[i] += colSum[i+j];
+		}
+		colSumFilter[i] /= 2*W + 1;
+	}
+
+	for (int i=0; i<W; i++)
+	{
+		colSumFilter[i] = colSumFilter[W];
+		colSumFilter[tBwImage.cols-i-1] = colSumFilter[tBwImage.cols-W-1];
+	}
+
+	tProj = colSumFilter;
+
+	return;
+}
+
+
+bool LINESEGMENT_PostProcess(const Mat &tBwImg, vector<cv::Rect> &tCutRects) {
+	vector<Rect> tCutRectsCpy = tCutRects;
+	if (tCutRects.size() <= 2)
+		return true;
+
+	Mat dilateImage = Mat::zeros(tBwImg.size(),CV_8UC1);
+	Mat elem = getStructuringElement(MORPH_RECT,Size(23,5));
+	dilate(tBwImg,dilateImage,elem);
+
+	vector<double> tVertProj;
+	Utility_VerticalProjection(dilateImage,tVertProj);
+
+	vector<Point> VertSeg;
+	for (int k = 0; k < tVertProj.size(); k++) {
+		Point pt(0,0);
+		if (tVertProj[k] != 0) {
+			pt.x = k;
+			while (tVertProj[k] != 0) {
+				k++;
+				if (k >= tVertProj.size())
+					break;
+			}
+			pt.y = k-1;
+			if (pt.y - pt.x > 15)
+				VertSeg.push_back(pt);
+		}
+	}
+	if (VertSeg.size() == 0)
+		VertSeg.push_back(Point(0,tVertProj.size()-1));
+
+	vector<vector<Rect>> newCutRects(VertSeg.size());
+	for (int i = 0; i < tCutRectsCpy.size(); i++) {
+		for (int k = 0; k < VertSeg.size(); k++) {
+			if (tCutRectsCpy[i].x >= VertSeg[k].x && (tCutRectsCpy[i].br().x - 1) <= VertSeg[k].y)
+				newCutRects[k].push_back(tCutRectsCpy[i]);
+		}
+	}
+
+	tCutRects.clear();
+	for (int i = 0; i < newCutRects.size(); i++) {
+		vector<Rect> tCutRects_sub = newCutRects[i];
+		if(tCutRects_sub.size()==0)
+			continue;
+		int stdWidth = 0,stdHeight = 0;
+		//合并间隔非常小的矩形框
+		vector<Point> gap(tCutRects_sub.size()-1);
+		int maxGap = 0,maxGapIdx = 0;
+		int minGap = tBwImg.cols,minGapIdx = 0;
+		int midGap = 0,midGapIdx = 0;
+		if (tCutRects_sub.size() == 1)
+		{
+			tCutRects.push_back(tCutRects_sub[0]);
+			continue;
+		} else if(tCutRects_sub.size() == 2) {
+			Mat tmpMat = tBwImg(Rect(VertSeg[i].x,0,VertSeg[i].y-VertSeg[i].x,tBwImg.rows));
+			Mat reduce_y;
+			reduce(tmpMat,reduce_y,0,CV_REDUCE_SUM,CV_32FC1);
+			vector<Point> seg1;
+			for(int k = 0; k < reduce_y.cols; k++) {
+				Point pt(0,0);
+				if(reduce_y.at<float>(0,k) != 0) {
+					pt.x = k;
+					while (reduce_y.at<float>(0,k) != 0) {
+						k++;
+						if(k >= reduce_y.cols)
+							break;
+					}
+					pt.y = k-1;
+					if(pt.y - pt.x > 15)
+						seg1.push_back(pt);
+				}
+			}
+			if(seg1.size() == 0)
+				continue;
+			else if(seg1.size() == 2) {
+				if(seg1[1].x - seg1[0].y<8)
+					tCutRects.push_back(Rect(tCutRects_sub[0].x,tCutRects_sub[0].y,tCutRects_sub[1].br().x-tCutRects_sub[0].x,tCutRects_sub[0].height));
+				else {
+					tCutRects.push_back(tCutRects_sub[0]);
+					tCutRects.push_back(tCutRects_sub[1]);
+				}
+			} else {
+				tCutRects.push_back(tCutRects_sub[0]);
+				tCutRects.push_back(tCutRects_sub[1]);
+			}
+		} else {
+			for(int k = 0; k < tCutRects_sub.size()-1; k++) {
+				int gapX = tCutRects_sub[k+1].x - (tCutRects_sub[k].x + tCutRects_sub[k].width);
+				if((gapX >tCutRects_sub[k].width&&gapX>tCutRects_sub[k+1].width)||gapX <=0)
+					gapX = 0;
+				gap[k].x = gapX;
+				gap[k].y = k;
+			}
+			sort(gap.begin(),gap.end(),CmpVectorByXAscend);
+			maxGap = gap[gap.size()-1].x;
+			maxGapIdx = gap[gap.size()-1].y;
+			minGap = gap[0].x;
+			minGapIdx = gap[0].y;
+			midGap = gap[gap.size()/2].x;
+			midGapIdx = gap[gap.size()/2].y;
+			if(maxGap - midGap<20) {	//最大字间距和字间距中值相差不大，则可认为这两个间距无差别			
+				vector<Rect> tmpRects1 = tCutRects_sub;
+				sort(tmpRects1.begin(),tmpRects1.end(),CmpVectorByWidthAscend);
+				stdWidth = (tmpRects1[tmpRects1.size()/2].width+tmpRects1[tmpRects1.size()/2].width)/2;
+				stdHeight = (tmpRects1[tmpRects1.size()/2].height+tmpRects1[tmpRects1.size()/2].height)/2;
+				if(midGap - minGap > tCutRects_sub[midGapIdx].width*0.2) { //小间隔的两个矩形框需要合并
+					tCutRects_sub[minGapIdx].width = tCutRects_sub[minGapIdx+1].width + tCutRects_sub[minGapIdx+1].x - tCutRects_sub[minGapIdx].x;
+					tCutRects_sub.erase(tCutRects_sub.begin()+minGapIdx+1);
+				}
+			}
+
+			//拆分过度合并的矩形框
+			vector<Rect> tCutRectTmp = tCutRects_sub;
+			if(tCutRectTmp.size()>2) {
+				for(int l = 0; l < tCutRectTmp.size(); l++) {
+					if(tCutRectTmp[l].width>=0.75*stdWidth&&tCutRectTmp[l].width<=1.25*stdWidth)
+						tCutRects.push_back(tCutRectTmp[l]);
+					else if(tCutRectTmp[l].width>1.25*stdWidth) {  //竖直投影找极小值
+						Mat tmpMat = tBwImg(tCutRectTmp[l]);
+						Mat tmpMat_y = Mat(Size(tmpMat.cols,1),CV_32FC1);
+						reduce(tmpMat,tmpMat_y,0,CV_REDUCE_SUM,CV_32FC1);
+						tmpMat_y /= 255;
+						Mat gaussTmpMat_y;
+						GaussianBlur(tmpMat_y,gaussTmpMat_y,Size(5,5),0.9);	
+						double maxVal = 0.0,minVal = 0.0;
+						Point maxLoc(0,0),minLoc;
+						minMaxLoc(tmpMat_y,&minVal,&maxVal,&minLoc,&maxLoc);
+
+						vector<Rect> cutRects;
+						for(int k = 0; k < tmpMat_y.cols; k++) {
+							Rect rect(0,0,0,0);
+							if(tmpMat_y.at<float>(0,k) != 0) {
+								rect.x = k;
+								rect.y = 0;
+								rect.height = tCutRectTmp[l].height;
+								while(tmpMat_y.at<float>(0,k)!=0) {
+									k++;
+									if(k >= tmpMat_y.cols-1) {
+										rect.width = k - rect.x;
+										break;
+									}
+								}
+								rect.width = k - rect.x;
+								if(rect.width>1)
+									cutRects.push_back(rect);
+								if(k < tmpMat_y.cols-1)
+									k -= 1;
+							}
+						}
+						vector<int> flag(cutRects.size(),1);
+						for(int k = 0; k < cutRects.size(); k++) {
+							if(flag[k] == 0)
+								continue;
+							//投影分割出来的矩形符合标准宽高，接收该分割结果
+							if(cutRects[k].width>=0.75*stdWidth&&cutRects[k].width<=1.25*stdWidth)
+								tCutRects.push_back(Rect(cutRects[k].x+tCutRectTmp[l].x,tCutRectTmp[l].y,cutRects[k].width,tCutRectTmp[l].height));
+							else if(k+1<cutRects.size()&&(cutRects[k].width+cutRects[k+1].width>0.7*stdWidth&&cutRects[k].width+cutRects[k+1].width<1.3*stdWidth)) {
+								tCutRects.push_back(Rect(cutRects[k].x+tCutRectTmp[l].x,tCutRectTmp[l].y,cutRects[k+1].x+cutRects[k+1].width - cutRects[k].x,tCutRectTmp[l].height));
+								flag[k+1] = 0;
+							} else {
+								tCutRects.push_back(Rect(cutRects[k].x+tCutRectTmp[l].x,tCutRectTmp[l].y,cutRects[k].width,tCutRectTmp[l].height));
+							}
+						}
+					} else {	//合并过切分的矩形框
+						l += 1;
+						if(l >= tCutRectTmp.size())
+							tCutRects.push_back(Rect(tCutRectTmp[l-1].x,tCutRectTmp[l-1].y,tCutRectTmp[l-1].width,tCutRectTmp[l-1].height));
+						else {
+							if(tCutRectTmp[l].width <0.75*stdWidth) {
+								Rect tmpRect(0,0,0,0);
+								tmpRect.x = tCutRectTmp[l-1].x;
+								tmpRect.y = tCutRectTmp[l-1].y;
+								tmpRect.width = tCutRectTmp[l].br().x - tCutRectTmp[l-1].tl().x;
+								tmpRect.height = tCutRectTmp[l].br().y - tCutRectTmp[l-1].tl().y;
+								tCutRects.push_back(tmpRect);
+							} else {
+								tCutRects.push_back(Rect(tCutRectTmp[l-1].x,tCutRectTmp[l-1].y,tCutRectTmp[l-1].width,tCutRectTmp[l-1].height));
+								l -= 1;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return 1;
+}

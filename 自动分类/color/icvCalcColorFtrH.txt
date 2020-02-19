@@ -1,0 +1,58 @@
+/************************************************************************/
+/* 
+
+	11种颜色分类		[R G B]
+	black(黑色)		[0 0 0]
+	blue(蓝色)		[0 0 1]
+	brown(棕色)		[0.5 0.4 0.25]
+	gray(灰色)		[0.5 0.5 0.5]
+	green(绿色)		[0 1 0]
+	orange(橘色)		[1 0.8 0]
+	pink(品红)		[1 0.5 1]
+	purple(紫色)		[1 0 1]
+	red(红色)		[1 0 0]
+	white(白色)		[1 1 1]
+	yellow(黄色)		[1 1 0]	
+
+	Learning Color Names from Real-World Images. CVPR2007.
+
+	Applying Color Names to Image Description.ICIP2007.
+
+	Learning Color Names for Real-World Applications. TIP 2009.
+
+*/
+/************************************************************************/
+
+#ifndef _ICV_CALC_COLOR_H_
+#define _ICV_CALC_COLOR_H_
+#include "mIvCommon.h"
+
+/* 
+ * ************************************************************
+ *	颜色特征提取引擎，参考上述论文中代码将相应颜色分为11类，
+ *	然后结合实际样本，对其中颜色分类结果进行重聚类.
+ * ***********************************************************
+ */
+
+const string colorSet[] = {"未知", "黑色", "蓝色", "绿色", "红色", "白色"};
+
+/// =============================================================================
+/// <颜色提取引擎初始化>
+long icvColor_Init(const char* modelpath);
+
+/// <颜色特征提取>
+void icvColor_calcFtr(long handle, Mat colorImg);
+
+/// <基于掩模提取图像的颜色信息，主要是提取背景色和线条颜色>
+void icvColor_calcFtr(long handle, Mat colorImg, Mat maskImg, int& nColor);
+
+/// <基于kmeans方式进行颜色聚类>
+void icvColor_kmeans(Mat image, Mat& backMat, Mat& foreMat, Mat& lineMat);
+
+/// <颜色提取引擎释放>
+void icvColor_UnInit(long& handle);
+
+/// <固定区域红色判定>
+bool icvFindRedRegion(Mat colorImg, Rect roi, int nThres);
+/// =============================================================================
+#endif

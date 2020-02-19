@@ -1,0 +1,365 @@
+#include "stdafx.h"
+#include "libSkew.h"
+
+
+namespace iSkew{
+
+	struct cmpPointList
+	{
+		cmpPointList(Point Pt) : mPt(Pt){};
+		bool operator() (const Point &ptA, const Point &ptB)
+		{
+			double dbDisPtA = (mPt.x - ptA.x) * (mPt.x - ptA.x) + (mPt.y - ptA.y) * (mPt.y - ptA.y);
+			double dbDisPtB = (mPt.x - ptB.x) * (mPt.x - ptB.x) + (mPt.y - ptB.y) * (mPt.y - ptB.y);
+
+			if (dbDisPtA < dbDisPtB)
+				return true;
+			else
+				return false;
+		}
+
+		Point mPt;
+	};
+
+	/// 图像倾斜调整
+	/// 输入应当是二值图像
+	/// 首先分析表格的四个角点坐标
+	/// 根据四个角点坐标判断输出图像的四个角点并进行仿射变换
+	Mat SkewAdjust(Mat src, Mat& dst, Rect roi)
+	{
+		if (src.empty())
+		{
+			return Mat();
+		}
+
+		Mat tmpG = src.clone();
+
+		int nHeight = tmpG.rows;
+		int nWidth = tmpG.cols;
+
+		Point refTopLefPt, refTopRigPt, refBotLefPt, refBotRigPt;
+
+		if (roi.width == 0 || roi.height == 0 || roi.x < 0 || roi.y < 0){
+			refTopLefPt = Point(0, 0);
+			refTopRigPt = Point(nWidth - 1, 0);
+			refBotLefPt = Point(0, nHeight - 1);
+			refBotRigPt = Point(nWidth - 1, nHeight - 1);
+		}
+		else {
+			refTopLefPt = Point(roi.x, roi.y);
+			refTopRigPt = Point(roi.br().x, roi.y);
+			refBotLefPt = Point(roi.x, roi.br().y);
+			refBotRigPt = Point(roi.br().x, roi.br().y);
+		}
+
+
+		Point2f realTopLefPt, realTopRigPt, realBotLefPt, realBotRigPt;
+		Point2f outTopLefPt, outTopRigPt, outBotLefPt, outBotRigPt;
+
+		{
+			int radius = 51;
+
+			Mat colGray, rowGray;
+
+			//  表格列格线提取与断裂修补
+			Mat element = getStructuringElement(MORPH_RECT, Size(1, radius));
+			morphologyEx(tmpG, colGray, MORPH_OPEN, element);
+
+			// 表格行格线提取与断裂修补
+			element = getStructuringElement(MORPH_RECT, Size(radius, 1));
+			morphologyEx(tmpG, rowGray, MORPH_OPEN, element);
+
+			tmpG = colGray | rowGray;
+		}
+
+		vector<Point> vForePointList;
+		for (int i = 0; i < nHeight; i++)
+		{
+			for (int j = 0; j < nWidth; j++)
+			{
+				if (255 == tmpG.at<uchar>(i,j))
+				{
+					vForePointList.push_back(Point(j, i));
+				}
+			}
+		}
+
+		if (vForePointList.size() < 4)
+		{
+			return Mat();
+		}
+
+		/// 获取实际表格的上下左右四个角点
+		sort(vForePointList.begin(), vForePointList.end(), cmpPointList(refTopLefPt));	realTopLefPt = vForePointList.front();
+		sort(vForePointList.begin(), vForePointList.end(), cmpPointList(refTopRigPt));	realTopRigPt = vForePointList.front();
+		sort(vForePointList.begin(), vForePointList.end(), cmpPointList(refBotLefPt));	realBotLefPt = vForePointList.front();
+		sort(vForePointList.begin(), vForePointList.end(), cmpPointList(refBotRigPt));	realBotRigPt = vForePointList.front();
+
+		/// 根据实际角点位置推算实际角点位置
+		outTopLefPt = Point2f((realTopLefPt.x + realBotLefPt.x) / 2, (realTopLefPt.y + realTopRigPt.y) / 2);
+		outTopRigPt = Point2f((realTopRigPt.x + realBotRigPt.x) / 2, (realTopLefPt.y + realTopRigPt.y) / 2);
+		outBotRigPt = Point2f((realTopRigPt.x + realBotRigPt.x) / 2, (realBotLefPt.y + realBotRigPt.y) / 2);
+		outBotLefPt = Point2f((realTopLefPt.x + realBotLefPt.x) / 2, (realBotLefPt.y + realBotRigPt.y) / 2);
+
+
+		/// 设定仿射源数据，目标源数据
+		vector<Point2f> vecSrcCorners,  vecDstCorners;
+		vecSrcCorners.push_back(realTopLefPt);	vecDstCorners.push_back(outTopLefPt);	// 左上
+		vecSrcCorners.push_back(realTopRigPt);	vecDstCorners.push_back(outTopRigPt);	// 右上
+		vecSrcCorners.push_back(realBotRigPt);	vecDstCorners.push_back(outBotRigPt);	// 右下
+		vecSrcCorners.push_back(realBotLefPt);	vecDstCorners.push_back(outBotLefPt);	// 左下
+
+		Mat transmtx;
+
+		/// 判断四个点所确定的四条直线是否平行，如果是则进行后处理，否则不进行处理。
+		if (abs(realBotRigPt.y - realBotLefPt.y - realTopRigPt.y + realTopLefPt.y) > 20 
+			|| abs(realBotRigPt.x - realBotLefPt.x - realTopRigPt.x + realTopLefPt.x) > 20)
+		{
+			transmtx = getPerspectiveTransform(vecSrcCorners, vecSrcCorners);
+		}
+		else{
+			/// 计算仿射变换矩阵
+			transmtx = getPerspectiveTransform(vecSrcCorners, vecDstCorners);
+			warpPerspective(src, dst, transmtx, Size(src.cols, src.rows));
+		}
+
+		return transmtx;
+	}
+	
+	float get_integral_val(Mat &mat, Mat &integal_mat, Point p1, Point p2)
+	{
+		if (mat.channels() != 1)
+		{
+			return -1;
+		}
+		float res;
+		if(mat.type() == CV_8UC1)
+		{
+			res = integal_mat.at<int>(p2) + integal_mat.at<int>(p1) -
+				integal_mat.at<int>(p2.y, p1.x) - integal_mat.at<int>(p1.y, p2.x);
+		}
+		else if(mat.type() == CV_32FC1)
+		{
+			res = integal_mat.at<float>(p2) + integal_mat.at<float>(p1) -
+				integal_mat.at<float>(p2.y, p1.x) - integal_mat.at<float>(p1.y, p2.x);
+		}
+		else
+		{
+			res = integal_mat.at<double>(p2) + integal_mat.at<double>(p1) -
+				integal_mat.at<double>(p2.y, p1.x) - integal_mat.at<double>(p1.y, p2.x);
+		}
+		return res;
+	}
+
+	int get_rows_projection(Mat &_im, Mat &integal_mat, vector<float> &rows_projection, float &max_rows_projection_val, int radius_val)
+	{
+		Mat im = _im.clone();
+		int up,down;
+
+		//radius_val半径内行，或运算获取新行
+		for(int i = 0; i < im.rows; ++i)
+		{
+			up = max(0, i - radius_val);
+			down = min((int)(im.rows - 1), i + radius_val);
+			for (int j = 0; j < im.cols; ++j)
+			{
+				for (int k = up; k <= down; ++k)
+				{
+					if(k == i)	continue;
+					im.at<uchar>(i, j) = im.at<uchar>(i, j) | _im.at<uchar>(k, j);
+				}
+			}
+		}
+		//imwrite("_im.bmp", _im);
+		//imwrite("im.bmp", im);
+
+		rows_projection.resize(im.rows);
+		max_rows_projection_val = 0;
+		for (int i = 0; i < im.rows; ++i)
+		{
+			//rows_projection[i] = get_integral_val(im, integal_mat, Point(0, i - radius_val), Point(im.cols, i + 1 + radius_val));
+			rows_projection[i] = sum(im(Rect(0, i, im.cols, 1)))[0] + sum(_im(Rect(0, i, im.cols, 1)))[0];
+			//rows_projection[i] = sum(im(Rect(0, i, im.cols, 1)))[0];
+			max_rows_projection_val = max(max_rows_projection_val, rows_projection[i]);
+		}
+		return 0;
+	}
+
+	int get_cols_projection(Mat &_im, Mat &integal_mat, vector<float> &cols_projection, float &max_cols_projection_val, int radius_val)
+	{
+		Mat im = _im.clone();
+		int left, right;
+
+		//radius_val半径内行，或运算获取新行
+		for(int j = 0; j < im.cols; ++j)
+		{
+			left = max(0, j - radius_val);
+			right = min((int)(im.cols - 1), j + radius_val);
+			for (int i = 0; i < im.rows; ++i)
+			{
+				for (int k = left; k <= right; ++k)
+				{
+					if(k == i)	continue;
+					im.at<uchar>(i, j) = im.at<uchar>(i, j) | _im.at<uchar>(i, k);
+				}
+			}
+		}
+
+		cols_projection.resize(im.cols);
+		max_cols_projection_val = 0;
+		for (int i = 0; i < im.cols; ++i)
+		{
+			//cols_projection[i] = get_integral_val(im, integal_mat, Point(i - radius_val, 0), Point(i + 1 + radius_val, im.rows));
+			cols_projection[i] = sum(im(Rect(i, 0, 1, im.rows)))[0] + sum(_im(Rect(i, 0, 1, im.rows)))[0];
+			max_cols_projection_val = max(max_cols_projection_val, cols_projection[i]);
+		}
+		return 0;
+	}
+
+	int get_rows_projection_fast(Mat &im, Mat &integal_mat, vector<float> &rows_projection, float &max_rows_projection_val, int radius_val)
+	{
+		rows_projection.resize(im.rows);
+		max_rows_projection_val = 0;
+		for (int i = radius_val; i < im.rows - radius_val; ++i)
+		{
+			rows_projection[i] = get_integral_val(im, integal_mat, Point(0, i - radius_val), Point(im.cols, i + 1 + radius_val));
+			max_rows_projection_val = max(max_rows_projection_val, rows_projection[i]);
+		}
+		return 0;
+	}
+
+	int get_cols_projection_fast(Mat &im, Mat &integal_mat, vector<float> &cols_projection, float &max_cols_projection_val, int radius_val)
+	{
+		cols_projection.resize(im.cols);
+		max_cols_projection_val = 0;
+		for (int i = radius_val; i < im.cols - radius_val; ++i)
+		{
+			cols_projection[i] = get_integral_val(im, integal_mat, Point(i - radius_val, 0), Point(i + 1 + radius_val, im.rows));
+			max_cols_projection_val = max(max_cols_projection_val, cols_projection[i]);
+		}
+		return 0;
+	}
+
+	float getLineFitness(Mat &affine_bw)
+	{
+		float res = 0;
+		float fitness_row = 0, fitness_col = 0;
+		int cnt_row = 0, cnt_col = 0, radius = 1;
+		vector<float> rows_projection(affine_bw.rows), cols_projection(affine_bw.cols);
+		float max_rows_projection = 0, max_cols_projection = 0;
+		Mat integal_mat;
+
+		integral(affine_bw, integal_mat);
+		get_rows_projection_fast(affine_bw, integal_mat, rows_projection, max_rows_projection, radius);
+		for (int i = 0; i < rows_projection.size(); ++i)
+		{
+			if (rows_projection[i] > max_rows_projection * 0.6)
+			{
+				fitness_row += rows_projection[i];
+				++cnt_row;
+			}
+		}
+
+		if (cnt_row == 0)
+		{
+			fitness_row = 0;
+		}
+		else
+		{
+			fitness_row /= cnt_row;
+		}
+
+		get_cols_projection_fast(affine_bw, integal_mat, cols_projection, max_cols_projection, radius);
+		for (int i = 0; i < cols_projection.size(); ++i)
+		{
+			if (cols_projection[i] > max_cols_projection * 0.6)
+			{
+				fitness_col += cols_projection[i];
+				++cnt_col;
+			}
+		}
+		if (cnt_col == 0)
+		{
+			fitness_col = 0;
+		}
+		else
+		{
+			fitness_col /= cnt_col;
+		}
+
+		res = (fitness_row + fitness_col);
+		fitness_row /= 255;
+		fitness_col /= 255;
+		return res;
+	}
+
+	Mat angel_modify(Mat &_bw)
+	{			
+		Mat ratation_mat;
+		float best_angle = 0.0;;
+		//Mat ratation_mat;
+		int _angle = 45;
+		float rate = sqrt(800. * 600. / (_bw.cols * _bw.rows));
+		Mat bw, affine_bw;
+		float best_fitness = 0, temp_fitness, fitness_row = 0, fitness_col = 0;
+		float best_fitness_row, best_fitness_col;
+
+
+		resize(_bw, bw, Size(_bw.cols * rate, _bw.rows * rate), 0, 0, INTER_NEAREST);
+		Point2f pt_2f = Point2f(bw.cols/2, bw.rows/2);
+		for (int angle = -abs(_angle); angle <= abs(_angle); angle += 1)
+		{
+			ratation_mat = getRotationMatrix2D(pt_2f, angle, 1);
+			warpAffine(bw, affine_bw, ratation_mat, bw.size(), INTER_NEAREST, BORDER_CONSTANT, Scalar(0,0,0,0));
+			temp_fitness = getLineFitness(affine_bw);
+
+			if (temp_fitness > best_fitness)
+			{
+				best_fitness_row = fitness_row;
+				best_fitness_col = fitness_col;
+				best_fitness = temp_fitness;
+				best_angle = angle;
+			}
+		}
+		pt_2f = Point2f(_bw.cols/2, _bw.rows/2);
+		ratation_mat = getRotationMatrix2D(pt_2f, best_angle, 1);
+		warpAffine(_bw.clone(), _bw, ratation_mat, _bw.size(), INTER_NEAREST, BORDER_CONSTANT, Scalar(0,0,0,0));
+
+
+		return ratation_mat;
+	}
+
+
+	/// 基于最小外接矩形的纠正
+	Mat minAreaRect(Mat &bw, Scalar filled){
+
+		vector<Point> vPoint;
+		for (int row = 0; row < bw.rows; row++)
+		{
+			for (int col = 0; col < bw.cols; col++)
+			{
+				if (bw.at<uchar>(row, col))
+				{
+					vPoint.push_back(Point(col, row));
+				}
+			}
+		}
+
+		RotatedRect rrect = minAreaRect(vPoint);
+		if (abs(rrect.angle) > 20 && abs(rrect.angle) < 70)
+		{
+			rrect.angle = 0;
+		}
+		else if (abs(rrect.angle) > 70)
+		{
+			rrect.angle = (rrect.angle > 0) ? (rrect.angle - 90 ) : (rrect.angle + 90);
+		}
+
+		Mat rotateMat = getRotationMatrix2D(rrect.center, rrect.angle, 1);
+		warpAffine(bw, bw, rotateMat, Size(bw.cols, bw.rows), 1, BORDER_CONSTANT, filled);
+
+		return rotateMat;
+	}
+
+
+}

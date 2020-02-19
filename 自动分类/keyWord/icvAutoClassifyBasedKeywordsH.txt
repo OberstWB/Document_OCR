@@ -1,0 +1,29 @@
+/// =============================================================================
+/// <						关键字检测、识别与粗分类									>
+/// <--------------------------------------------------------------------------->
+/// <这里的关键字检测分类两种：中文、英文。中文调用了两种切分算法，英文则调用蒋毅编写切分算法那	>
+/// <基于关键字的分类应该采用多级级联方式进行，一级划分、二级划分、三级划分等，即boosting思想	>
+/// =============================================================================
+
+#ifndef _ICV_AUTO_CLASSIFY_KEY_WORD_H_
+#define _ICV_AUTO_CLASSIFY_KEY_WORD_H_
+
+#include "icvTemplateInfo.h"
+
+typedef enum _tagKeyType {
+	ICV_KEY_FINE,
+	ICV_KEY_COARSE,
+}icvKeyType;
+
+/// =============================================================================
+
+long icvAutoClassifyKeyword_init(string modelpath);
+
+void icvAutoClassifyBasedKeyword(long ocrHandle, Mat binImg, vector<ImageTemplate> vecIT, ReferPtInfo refPtInfo, vector<int>& vecIndex, icvKeyType keyType = ICV_KEY_COARSE);
+
+void icvAutoClassifyTitleMatch(long ocrHandle, Mat binImg, vector<ImageTemplate> vecIT, ReferPtInfo refPtInfo, DocImgInfo imgInfo, int nFormMatch, vector<int>& vecIndex);
+
+void icvAutoClassifyKeyword_uninit(long& handle);
+
+/// =============================================================================
+#endif

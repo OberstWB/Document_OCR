@@ -1,0 +1,70 @@
+// 下列 ifdef 块是创建使从 DLL 导出更简单的
+// 宏的标准方法。此 DLL 中的所有文件都是用命令行上定义的 LIBALLENGINE_EXPORTS
+// 符号编译的。在使用此 DLL 的
+// 任何其他项目上不应定义此符号。这样，源文件中包含此文件的任何其他项目都会将
+// LIBALLENGINE_API 函数视为是从 DLL 导入的，而此 DLL 则将用此宏定义的
+// 符号视为是被导出的。
+#pragma once
+#ifdef LIBEVALUATIONFORMRECOGNITION_EXPORTS
+#define LIBEVALUATIONFORMRECOGNITION_API extern "C" __declspec(dllexport)
+#else
+#define LIBEVALUATIONFORMRECOGNITION_API extern "C" __declspec(dllimport)
+#endif
+
+/// 算法返回值，根据返回值判断算法内部的处理现状
+enum {
+	EVA_RET_OK			= 0,		/// <正确识别>
+	EVA_RET_ERR_MODEL		= -1,		/// <模型加载失败>
+	EVA_RET_ERR_HANDLE    = -2,		/// <引擎句柄异常>
+	EVA_RET_ERR_IMG_PATH	= -3,		/// <识别图像路径异常>
+	EVA_RET_ERR_IMG_DATA	= -4,		/// <识别图像数据流异常>
+	EVA_RET_ERR_IMG_MAT	= -5,		/// <mat 为空>
+	EVA_RET_ERR_QUALITY	= -6,		/// <图像质量异常>	
+	EVA_RET_ERR_NO_MATCH  = -7,		/// <不匹配>
+	EVA_RET_ERR_PARA		= -8,		/// <参数错误>
+	EVA_RET_ERR_CLASSIFY_IN     =-9,///<输入版式匹配失败>
+	EVA_RET_ERR_RECO           =-10,///<识别失败>
+	EVA_RET_ERR_IN_TRANS_OUT =-11///<格式转换失败>
+};
+
+///测评表细分类别
+typedef enum{
+	OUT_EVA_XRYR= 5,		               ///<选人用人工作民主评议表>
+	OUT_EVA_XTB= 6,		                   ///<新提拔干部民主评议表>
+	OUT_EVA_HGGB = 7,		               ///<会管单位会管干部年度考核测评表>
+	OUT_EVA_HGBZ_ZZYY = 8,		   ///<会管单位领导班子年度考核测评表(组织运营)>
+	OUT_EVA_HGBZ_JGZC=9,            ///<会管单位领导班子年度考核测评表(监管支持)>
+	OUT_EVA_HGBZ_ZLFW=10,           ///<会管单位领导班子年度考核测评表(自律服务)>
+	ERR_TYPE=12                               ///<错误类型>
+}outEVAFormType;
+///所有检测引擎和模型一次性全局初始化
+/*参数说明
+enginePath--所有识别引擎的存放路径[IN]
+modelPath--所有输入模板和输出模板存放路径[IN]
+allHandle--所有引擎和模板加载后的全局句柄[OUT]
+*/
+LIBEVALUATIONFORMRECOGNITION_API int eva_form_recog_init(string enginePath,string modelpath, long& allHandle);
+
+///基于路径的测评表识别
+/*参数说明
+handle--全局引擎和模型句柄[IN]
+imgPath--单张待识别图像路径[IN]
+recogResult--以string类型输出的结果[OUT]
+iType--算法盲判断出的输出测评表格式类型[OUT]
+*/
+LIBEVALUATIONFORMRECOGNITION_API int eva_form_recog_byPath(long handle,string imgPath,string& recogResult,outEVAFormType& iType);
+
+///基于opencv中Mat图像的测评表识别
+/*参数说明
+handle--全局引擎和模型句柄[IN]
+recogMat--基于opencv中Mat类的单张待识别图像[IN]
+recogResult--以string类型输出的结果[OUT]
+iType--算法盲判断出的输出测评表格式类型[OUT]
+*/
+LIBEVALUATIONFORMRECOGNITION_API int eva_form_recog_byMat(long handle,Mat recogMat,string& recogResult,outEVAFormType& iType);
+
+//模型和引擎释放
+/*参数说明
+handle--全局引擎和模型句柄[IN]
+*/
+LIBEVALUATIONFORMRECOGNITION_API void eva_form_recog_uninit(long&handle);

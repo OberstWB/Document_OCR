@@ -1,0 +1,53 @@
+/******************************************************************
+
+*******************************************************************/
+#ifndef SegAndReg_h
+#define SegAndReg_h
+
+#ifndef SegAndReg_DLL_API
+#define SegAndReg_DLL_API  extern "C" _declspec(dllexport)
+#else
+#define SegAndReg_DLL_API extern "C" _declspec(dllimport)
+#endif
+
+#include <string>
+#include <tchar.h>
+#include "stdio.h"
+#include "opencv/cv.h"
+
+#include "SegRecComm.h"
+using namespace SegRecComm;
+
+//using namespace std;
+
+namespace SegAndRec_table_ocr
+{
+
+SegAndReg_DLL_API bool SegAndReg(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+
+//SegAndReg_DLL_API bool SegAndReg2(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+
+SegAndReg_DLL_API bool SegAndReg3(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+
+SegAndReg_DLL_API bool LineSegAndReg(int method,long hHandle,MyOcrEngine p,int iType,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+//单行或多行文字切分识别接口，可通过设置method选择不同的切分与识别方法
+//method=0，基于联通域分析的单行文字切分与识别方法
+//method=1，基于二叉树的单行文字切分与识别方法
+//method=2，针对数字字母混合单行文字的切分与识别方法
+//method=3，针对多行交错文字的切分与识别方法
+
+//characterset==0,全字符集
+//characterset==1,阿拉伯数字字符集
+//characterset==2,大小写英文字母符集
+//characterset==3,大小写英文字母加上阿拉伯数字字符集
+
+///基于IdCardOCR_v3.0的接口
+SegAndReg_DLL_API bool SegAndReg_ID(long hHandle,int iType,/*MyOcrEngine p,*/const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+
+SegAndReg_DLL_API bool SegAndReg2_ID(long hHandle,int iType,/*MyOcrEngine p*/const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+
+SegAndReg_DLL_API bool SegAndReg3_ID(long hHandle,int iType,/*MyOcrEngine p*/const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+
+SegAndReg_DLL_API bool LineSegAndReg_ID(int method,long hHandle,/*MyOcrEngine p,*/int iType,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult);
+}
+#endif

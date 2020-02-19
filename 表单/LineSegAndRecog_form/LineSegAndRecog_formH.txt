@@ -1,0 +1,63 @@
+#pragma once
+
+#ifdef _MSC_VER
+#ifndef _LINESEGANDRECOG_FORM_EXPORTS
+#define LINESEGANDRECOG_FORM_API extern "C" __declspec(dllexport)
+#else
+#define LINESEGANDRECOG_FORM_API extern "C" __declspec(dllimport)
+#endif
+#else
+#define LINESEGANDRECOG_FORM_API
+#endif
+
+#include "SegRecComm.h"
+using namespace SegRecComm;
+
+//待切分识别字符类型
+#define CHAR_NUMPUNC	 (0)			// 数字+符号（主要针对小写金额部分）
+#define CHAR_CHNPUNC	 (1)			// 汉字+符号(主要针对姓名部分)
+#define CHAR_PURENUM	 (2)			// 纯数字(针对卡号)
+#define CHAR_PURECHN	 (3)			// 纯汉字
+#define CHAR_CHNNUMPUNC	 (4)			// 汉字+数字+英文字母
+#define CHAR_NUMENG		 (5)			// 数字+英文字母
+
+/*****************************************************/
+//功能：表单行切分识别初始化
+//输入：strPath，词典路径
+//输出：无
+//返回：初始化句柄，返回值不为0时初始化成功，为0时初始化失败
+/*****************************************************/
+LINESEGANDRECOG_FORM_API long LineSegAndRecog_Init(string strPath);
+
+
+/*****************************************************/
+//功能：表单行切分识别词典卸载
+//输入：tHandles，初始化句柄
+//输出：无
+//返回：无
+/*****************************************************/
+LINESEGANDRECOG_FORM_API void LineSegAndRecog_UnInit(long tHandles);
+
+
+/*****************************************************/
+//功能：表单行切分识别
+//输入：method,选择切分方法
+//		tHandles,初始化句柄
+//		iType,待切分识别字符类型
+//		tsrcImg,待切分识别行原始灰度图
+//		tBwImg,待切分识别行二值图
+//输出：strResult,切分识别结果
+//返回：处理成功返回0，失败返回-1
+/*****************************************************/
+LINESEGANDRECOG_FORM_API int LineSegAndRecogForm(int method,long tHandles,int iType,Mat tsrcImg,Mat tBwImg,LineOcrResult& strResult);
+/*****************************************************/
+//功能：表单行切分识别2（选用NPNTR_ID引擎识别姓名）
+//输入：method,选择切分方法
+//		tHandles,初始化句柄
+//		iType,待切分识别字符类型
+//		tsrcImg,待切分识别行原始灰度图
+//		tBwImg,待切分识别行二值图
+//输出：strResult,切分识别结果
+//返回：处理成功返回0，失败返回-1
+/*****************************************************/
+LINESEGANDRECOG_FORM_API int LineSegAndRecogForm_ID(int method,long tHandles,int iType,Mat tsrcImg,Mat tBwImg,LineOcrResult& strResult);

@@ -1,0 +1,961 @@
+#include "stdafx.h"
+#include "libRecogText.h"
+#include "LineSegAndRecog_form.h"
+#include "libLocText.h"
+#include "libThresh.h"
+
+//#define NPNTR_IDCARD  //控制算法内部是否进入IdCardOCR_v3.0引擎的开关
+#pragma comment(lib, MIVLIB("LineSegAndRecog_form"))
+
+int min3(int a, int b, int c)
+{
+	int tmp = a < b ? a : b;
+	return tmp < c ? tmp : c;
+}
+
+// calculate the distance of the two string.
+int editDistance(string str1, string str2)
+{
+	int max1 = str1.size();
+	int max2 = str2.size();
+
+	// malloc and init.
+	int **ptr = new int *[max1 + 1];
+
+	for (int i = 0; i < max1 + 1; i++)
+	{
+		ptr[i] = new int[max2 + 1];
+	}
+
+	for (int i = 0; i < max1 + 1; i++)
+	{
+		ptr[i][0] = i;
+	}
+
+	for (int i = 0; i < max2 + 1; i++)
+	{
+		ptr[0][i] = i;
+	}
+
+	// core of the edit distance.
+	for (int i = 1; i < max1 + 1; i++)
+	{
+		for (int j = 1; j < max2 + 1; j++)
+		{
+			int cost = str1[i - 1] == str2[j - 1] ? 0 : 1;
+			int deletion = ptr[i - 1][j] + 1;
+			int insertion = ptr[i][j - 1] + 1;
+			int substitution = ptr[i - 1][j - 1] + cost;
+
+			ptr[i][j] = min3(deletion, insertion, substitution);
+		}
+	}
+
+
+	int nDist = ptr[max1][max2];
+
+	// free and return.
+	for (int i = 0; i < max1 + 1; i++)
+	{
+		delete[] ptr[i];
+		ptr[i] = NULL;
+	}
+
+	delete[] ptr;
+	ptr = NULL;
+
+	return nDist;
+}
+
+/***************************************************************************
+功能：利用动态规划匹配来获得其字符串对准结果
+参数：truth是标准文本
+	  rec是识别文本
+	  result[0]:正确字数
+      result[1]:删除字数
+	  result[2]:插入字数
+	  result[3]:替换字数
+***************************************************************************/
+void DPOneLine(char truth[], char rec[],int truNum,int recNum,int result[4])
+{
+	int i,j;
+	const int InsC=1;
+	const int DelC=1;
+	const int RepC=1;
+	struct NODE{
+		int value;
+		NODE *parent;
+		int Cr,De,Re,Ie;
+	};
+	NODE **nodes; 
+	NODE tmpNd;
+	nodes= new NODE *[truNum+1];
+	for(i=0;i<truNum+1;i++)
+	{
+		nodes[i]=new NODE[recNum+1];
+		memset(nodes[i],0,sizeof(NODE)*(recNum+1));
+	}
+	nodes[0][0].parent=NULL;
+	nodes[0][0].value=0;
+	for(i=1;i<truNum+1;i++)
+	{
+		nodes[i][0].value=i;
+		nodes[i][0].parent=NULL;
+		nodes[i][0].De=i;
+	}
+	for(i=1;i<recNum+1;i++)
+	{
+		nodes[0][i].value =i;
+		nodes[0][i].parent=NULL;
+		nodes[0][i].Ie=i;
+	}
+	int tmpValue;
+	for(i=1;i<truNum+1;i++)
+	{
+		for(j=1;j<recNum+1;j++)
+		{
+			//比较内存，若相等//已经转为半角字符
+			if(!memcmp(&truth[2 * i - 2],&rec[2 * j - 2],2))
+			{
+				tmpValue=0;
+				tmpNd.Cr=nodes[i-1][j-1].Cr+1;//正确个数加1
+				tmpNd.De=nodes[i-1][j-1].De;
+				tmpNd.Re=nodes[i-1][j-1].Re;
+				tmpNd.Ie=nodes[i-1][j-1].Ie;
+			}
+			else
+			{
+				tmpValue=RepC;
+				tmpNd.Cr=nodes[i-1][j-1].Cr;
+				tmpNd.De=nodes[i-1][j-1].De;
+				tmpNd.Re=nodes[i-1][j-1].Re+1;//替代误差
+				tmpNd.Ie=nodes[i-1][j-1].Ie;
+			}
+
+			tmpNd.value=tmpValue+nodes[i-1][j-1].value;
+			tmpNd.parent=&nodes[i-1][j-1];
+
+			if(tmpNd.value>=nodes[i][j-1].value+InsC)
+			{
+				tmpNd.parent=&nodes[i][j-1];
+				tmpNd.value=nodes[i][j-1].value+InsC;
+				tmpNd.Cr=nodes[i][j-1].Cr;
+				tmpNd.De=nodes[i][j-1].De;
+				tmpNd.Re=nodes[i][j-1].Re;
+				tmpNd.Ie=nodes[i][j-1].Ie+1;//插入误差
+			}
+
+			if(tmpNd.value>=nodes[i-1][j].value+DelC)//>=2011-3-1
+			{
+				tmpNd.parent=&nodes[i-1][j];
+				tmpNd.value=nodes[i-1][j].value+DelC;
+				tmpNd.Cr=nodes[i-1][j].Cr;
+				tmpNd.De=nodes[i-1][j].De+1;//删除误差
+				tmpNd.Re=nodes[i-1][j].Re;
+				tmpNd.Ie=nodes[i-1][j].Ie;
+			}
+			nodes[i][j]=tmpNd;
+		}
+	}
+	result[0]=nodes[truNum][recNum].Cr;
+	result[1]=nodes[truNum][recNum].De;
+	result[2]=nodes[truNum][recNum].Ie;
+	result[3]=nodes[truNum][recNum].Re;
+	for(i=0;i<truNum+1;i++)
+	{
+		delete []nodes[i];
+	}
+	delete []nodes;
+}
+
+void MarginDistance(const wstring &strLine,vector<wstring> tParam,int &idx,vector<int>& parameters)
+{
+	char resultBuffer[1024];
+	memset(resultBuffer,0,1024);
+	string resultStr=classToStr(strLine);
+	memcpy(resultBuffer,const_cast<char*>(resultStr.c_str()),resultStr.length());
+
+	int rigthNum=0;
+	int wrongNum=resultStr.length()*2;
+	vector<int> para;
+	for (int i=0;i<tParam.size();i++)
+	{
+		char truthBuffer[1024];
+		memset(truthBuffer,0,1024);
+
+		string truthStr=classToStr(tParam[i]);
+		memcpy(truthBuffer,const_cast<char*>(truthStr.c_str()),truthStr.length());
+
+
+		int result[4] = {0};
+		DPOneLine(truthBuffer, resultBuffer,truthStr.length(),resultStr.length(),result);
+
+		if (rigthNum<result[0]&&wrongNum>result[1])
+		{
+			para.clear();
+			rigthNum=result[0];
+			wrongNum=result[1];
+			idx=i;
+			for (int j=0;j<4;j++)
+			{
+				para.push_back(result[j]);
+			}
+		}
+	}
+	if (idx>0)
+	{
+		for(int i=0;i<4;i++)
+			parameters.push_back(para[i]);
+	}
+
+
+}
+
+int getNearestAtomFrmDic(vector<string> vStr, string atom, int &nIndex)
+{
+	// init.
+	int nDist = 0x7FFFFFFF;
+	nIndex = -1;
+
+	vector<int> vecResult;
+	vector<int> vecIndex;
+
+	// core of search atom in the dictionary.
+	for (int i = 0; i < vStr.size(); i++)
+	{
+		string str = vStr[i];
+		int nLen = editDistance(str, atom);
+
+		vecResult.push_back(nLen);
+
+		if (nLen < nDist)
+		{
+			nDist = nLen;
+		}
+	}
+
+	int nCnt = 0;
+	for (int i = 0; i < vecResult.size(); i++)
+	{
+		if (nDist == vecResult[i])
+		{
+			nCnt++;
+			vecIndex.push_back(i);
+		}
+	}
+
+	if (nCnt == 1)
+	{
+		nIndex = vecIndex[0];
+		return nDist;
+	}
+	else
+	{
+		nIndex = vecIndex[0];
+		return nDist;
+	}
+
+}
+
+bool CheckIfTextByBwImage(Mat bwImg, float fThres = 0.3)
+{
+	if (bwImg.empty())
+	{
+		return false;
+	}
+
+	int height = bwImg.rows;
+	int width  = bwImg.cols;
+	int edge = 4;
+
+	if (height < 2 * edge || width < 2 * edge)
+	{
+		return false;
+	}
+
+	int nTmp, nMaxColSum = 0, nMaxRowSum = 0;
+
+
+	for (int i = edge; i < width - edge; i++)
+	{
+		nTmp = sum(bwImg.col(i))[0] / 255;
+		if (nTmp > nMaxColSum)
+		{
+			nMaxColSum = nTmp;
+		}
+	}
+
+	for (int i = edge; i < height - edge; i++)
+	{
+		nTmp = sum(bwImg.row(i))[0] / 255;
+		if (nTmp > nMaxRowSum)
+		{
+			nMaxRowSum = nTmp;
+		}
+	}
+
+	// 判决是否文本
+	if (nMaxRowSum < width * fThres && nMaxColSum < height * fThres)
+	{
+		return false;
+	}
+	else
+	{
+		return true;
+	}
+
+
+}
+
+bool sortRectTopLeft_RecogText(Rect a, Rect b)
+{
+	if (abs(a.y - b.y) > int((a.height + b.height)/2 * 0.75))
+	{
+		return a.y < b.y;
+	}
+	else
+	{
+		return a.x < b.x;
+	}
+}
+
+namespace iRecogText{
+
+	bool getValidTextRegion(Mat src, int &nLeft, int &nRight, int &nTop, int &nBottom)
+	{
+		if (src.empty())
+		{
+			return false;
+		}
+
+		int nHeight = src.rows;
+		int nWidth  = src.cols;
+
+		int pad = 1;
+		copyMakeBorder(src, src, pad, pad, pad, pad, BORDER_CONSTANT, Scalar(0,0,0));
+
+		vector<vector<Point> > contours;
+		findContours(src, contours, CV_RETR_LIST|CV_RETR_EXTERNAL , CV_CHAIN_APPROX_NONE);
+
+		nTop = src.rows - 1;
+		nBottom = 0;
+		nLeft = src.cols - 1;
+		nRight = 0;
+
+		for (int i = 0; i < contours.size(); i++)
+		{
+			Rect rc = boundingRect(contours[i]);
+
+			if (rc.height < 8 && rc.width < 8 || rc.width > nHeight * 3)
+			{
+				continue;
+			}
+
+			nTop = min(nTop, rc.y);
+			nBottom = max(nBottom, rc.y + rc.height);
+			nLeft = min(nLeft, rc.x);
+			nRight = max(nRight, rc.x + rc.width);
+		}
+
+		nTop -= pad;
+		nBottom -= pad;
+		nLeft -= pad;
+		nRight -= pad;
+
+		nLeft = max(0, nLeft - nBottom + nTop);
+		nRight = min(nWidth, nRight + nBottom - nTop);
+
+
+		if (nTop >= nBottom || nLeft >= nRight || (nBottom - nTop) < 10 || (nRight - nLeft) < 10)
+		{
+			return false;
+		}
+		else
+		{
+			return true;
+		}
+	}
+
+	// 添加剔除格线干扰功能。
+	void removeErrRegionOfBwImg(Mat &bw)
+	{
+		if (bw.empty() || bw.channels() != 1)
+		{
+			return;
+		}
+
+		vector<vector<Point> > contours;
+		{
+			Mat tmpBw = bw.clone();
+			findContours(tmpBw, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+		}
+
+		for (int i = 0; i < contours.size(); i++)
+		{
+			Rect rc = boundingRect(contours[i]);
+			if ((rc.width <= 2 && (abs(bw.cols - rc.x) < std::min((double)10,bw.cols/10.0) || rc.x < std::min((double)10,bw.cols/10.0)))
+				|| (rc.height <= 2 && (abs(bw.rows - rc.y) < std::min((double)10,bw.rows/10.0) || rc.y < std::min((double)10,bw.rows/10.0))))
+			{
+				bw(rc) = 0;
+				//Mat tmp_mat = Mat::zeros(rc.height,rc.width,CV_8UC1);
+				//tmp_mat.copyTo(bw(rc));
+			}
+		}
+	}
+	void imgTrans(Mat srcCellGray,Mat srcBw,Mat& cellGrayBlack)//图像由灰度图转化为前景灰白，背景纯黑图
+	{
+		Mat tCombineImage;
+		////BinaryMothed(srcImage,LINE_GATOS,bina);
+		//threshold(srcCellGray,bina,0,255,THRESH_OTSU|THRESH_BINARY_INV);
+		tCombineImage=Mat::zeros(srcCellGray.size(),CV_8UC1);
+		int width = srcCellGray.cols;
+		int height = srcCellGray.rows;
+		for(int k = 0; k < height; k++)
+		{
+			uchar* tGray_ptr = srcCellGray.ptr<uchar>(k);
+			uchar* tCom_ptr = tCombineImage.ptr<uchar>(k);
+			uchar* tBina_ptr = srcBw.ptr<uchar>(k);
+			for(int l = 0; l < width; l++)
+			{
+				if(tBina_ptr[l] != 0)
+					tCom_ptr[l] = 255 - tGray_ptr[l];
+			}
+		}
+		cellGrayBlack=tCombineImage;
+	}
+	void lineOCR(long handle, Mat grayImg, iTableFormCell& cellResult){
+		if (handle <= 0 || grayImg.empty())
+		{
+			cellResult.str = "";
+			cellResult.dcf = 0.0;
+			return;
+		}
+
+		iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)handle;
+		long lOcrHandle = engine->lOcrHandle;
+		if (handle <= 0 || lOcrHandle <= 0 || grayImg.empty())
+		{
+			cellResult.str = "";
+			cellResult.dcf = 0.0;
+			return;
+		}
+
+		Mat bw;
+		//medianBlur(grayImg,grayImg,3);
+		//threshold(grayImg, bw, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);//原始的二值化方法
+
+		//打印模糊字块全部联通，解决办法降低otsu所计算的阈值20180417
+		double dThres = threshold(grayImg, bw, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+		//threshold(grayImg, bw, std::max(60.0, dThres - 30), 255, CV_THRESH_BINARY_INV);
+		///一些测试的二值化方法
+		//iThresh::Binarization_Sauvola(grayImg,bw,9,9,0.5);
+		//adaptiveThreshold(grayImg,bw,255,ADAPTIVE_THRESH_MEAN_C,CV_THRESH_BINARY_INV,11,20);
+	    //bw=~bw;
+		//iLocText::fillEdge(bw);
+		removeErrRegionOfBwImg(bw);
+
+		int nLeft = 0,nTop = 0, nRight = 0, nBottom = 0;
+		if (!getValidTextRegion(bw, nLeft, nRight, nTop, nBottom))
+		{
+			cellResult.str = "";
+			cellResult.dcf = 0.0;
+			return;
+		}
+
+		Rect roiRect = Rect(nLeft, nTop, nRight - nLeft, nBottom - nTop);
+		bw = bw(roiRect);
+		grayImg = grayImg(roiRect);
+		Mat tCombineImg;
+		imgTrans(grayImg,bw,tCombineImg);
+		//if (bw.rows >= 35)
+		//{
+		//	Mat element = getStructuringElement(MORPH_RECT, Size(3,3));
+		//	dilate(bw, bw, element);
+		//}
+
+		if (!CheckIfTextByBwImage(bw,0.4) || !have_black_text_check(grayImg, bw, 30))
+		{
+			cellResult.dcf = 0.0;
+			cellResult.str = "";
+			return;
+		}
+
+		LineOcrResult strResult;
+		{
+			Mat tmp = bw.clone();
+			Mat tmpCombine;
+			medianBlur(tmp, tmp, 3);
+			//Mat medianImg=tmp.clone();
+			dilate(tmp, tmp, Mat::ones(3,3,CV_8UC1));
+			vector<int> rowHist;
+			vector<iLocText::SegPart>vSegPart;
+			iLocText::calcRowHist(tmp, rowHist);
+			iLocText::segHist(rowHist, 0.01, vSegPart);
+
+			if (vSegPart.size() >= 2 && vSegPart[0].nEnd - vSegPart[0].nStart > 16 && vSegPart[1].nEnd - vSegPart[1].nStart > 16) {
+				for (int i = 0; i < vSegPart.size(); i++) {
+					tmp = bw(Range(vSegPart[i].nStart, vSegPart[i].nEnd), Range(0, bw.cols)).clone();//原为bw;20180417王博
+					tmpCombine = tCombineImg(Range(vSegPart[i].nStart, vSegPart[i].nEnd), Range(0, bw.cols));
+#ifndef NPNTR_IDCARD
+					LineSegAndRecogForm(0,lOcrHandle,CHAR_CHNNUMPUNC, tmp, tmp, strResult);
+#else
+					LineSegAndRecogForm_ID(0, lOcrHandle, CHAR_CHNNUMPUNC, tmpCombine, tmp, strResult);//
+#endif	
+				}
+			}
+			else{
+#ifndef NPNTR_IDCARD
+				LineSegAndRecogForm(0, lOcrHandle, CHAR_CHNNUMPUNC, bw, bw, strResult);//20180517王博将第一个图改为灰度图测试效果
+#else
+				LineSegAndRecogForm_ID(0, lOcrHandle, CHAR_CHNNUMPUNC, tCombineImg, bw, strResult)
+#endif
+			}
+		}
+
+		if (strResult.vecOcrRectResult.size() == 0)
+		{
+			cellResult.str = "";
+			cellResult.dcf = 0.0;
+			return;
+		}
+
+		tstring retStr;
+		float fCof = 0;
+		for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)
+		{
+			if (strResult.vecOcrRectResult[k].strResult.size())
+			{
+				retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+				fCof += strResult.vecOcrRectResult[k].dbConfi[0];
+			}			
+		}
+
+		if (retStr.size()){
+			fCof /= retStr.size();
+		}
+		else{
+			fCof = 0.0f;
+		}
+
+		string strTmp = classToStr<tstring>(retStr);
+
+		/// 判断该域是否为数字
+		int score = 0;
+		for (size_t l = 0; l < strTmp.size(); ++l)
+		{
+			int index_char = num_str.find_first_of(strTmp[l]);
+
+			if (index_char >= 0)
+			{ 
+				++score;
+			}
+		}
+
+		/// 如果该域为数字则重新识别20180301王博，代发工资单改为0.2，原为0.5（财报）
+		if (score >= 0.5 * strResult.vecOcrRectResult.size())
+		{
+			strResult.vecOcrRectResult.clear();
+			LineSegAndRecogForm(0, lOcrHandle, CHAR_NUMPUNC, bw, bw, strResult);
+
+			retStr.clear();
+			fCof = 0.0;
+			for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)	{
+				if (strResult.vecOcrRectResult[k].strResult.size()){
+					retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+					fCof += strResult.vecOcrRectResult[k].dbConfi[0];
+				}				
+			}
+
+			if (retStr.size()){
+				fCof /= retStr.size();
+			}
+			else{
+				fCof = 0.0f;
+			}
+			cellResult.str = classToStr<tstring>(retStr);
+			cellResult.dcf = fCof;
+		}
+		else
+		{
+			//strResult.vecOcrRectResult.clear();
+			//LineSegAndRecogForm(0, lOcrHandle, CHAR_CHNPUNC, bw, bw, strResult);
+
+			retStr.clear();
+			fCof = 0.0;
+			for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)	{
+				if (strResult.vecOcrRectResult[k].strResult.size()){
+					retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+					fCof   += strResult.vecOcrRectResult[k].dbConfi[0];
+				}				
+			}
+
+			if (retStr.size()){
+				fCof /= retStr.size();
+			}
+			else{
+				fCof = 0.0f;
+			}
+			strTmp = classToStr<tstring>(retStr);
+
+			if (engine->bUseTextDic)
+			{
+				int nIdx = 0;
+				int nDis = getNearestAtomFrmDic(engine->vStrDic, strTmp, nIdx);
+				if (nDis < strTmp.size() / 2)
+				{
+					strTmp = engine->vStrDic[nIdx];
+				}
+			}
+
+		//if (strResult.vecOcrRectResult.size() == 0)
+		//{
+		//	cellResult.str = "";
+		//	cellResult.dcf = 0.0;
+		//	return;
+		//}
+
+		//tstring retStr;
+		//float fCof = 0;
+		//for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)
+		//{
+		//	if (strResult.vecOcrRectResult[k].strResult.size())
+		//	{
+		//		retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+		//		fCof += strResult.vecOcrRectResult[k].dbConfi[0];
+		//	}			
+		//}
+
+		//if (retStr.size()){
+		//	fCof /= retStr.size();
+		//}
+		//else{
+		//	fCof = 0.0f;
+		//}
+
+		//string strTmp = classToStr<tstring>(retStr);
+
+		///// 判断单元格内的单行是否为数字
+		//int score = 0;
+		//for (size_t l = 0; l < strTmp.size(); ++l)
+		//{
+		//	int index_char = num_str.find_first_of(strTmp[l]);
+
+		//	if (index_char >= 0)
+		//	{
+		//		++score;
+		//	}
+		//}
+
+		///// 如果该域为数字则重新识别(王博修改)
+		//if (score > 0.5 * strResult.vecOcrRectResult.size())//王博20171018修改（配合代发工资单改为>0.5）
+		//{
+		//	strResult.vecOcrRectResult.clear();
+		//	Mat tmpBw,numBw;
+		//	threshold(~numGray, tmpBw, 0, 255,  CV_THRESH_OTSU);//王博20171019更改重新判断为数字情况的二值化
+		//	removeErrRegionOfBwImg(tmpBw);
+
+		//	int numLeft = 0,numTop = 0, numRight = 0, numBottom = 0;
+		//	/*if (!getValidTextRegion(numBw, numLeft, numRight, numTop, numBottom))
+		//	{
+		//		cellResult.str = "";
+		//		cellResult.dcf = 0.0;
+		//		return;
+		//	}*/
+		//	getValidTextRegion(tmpBw, numLeft, numRight, numTop, numBottom);
+		//	Rect numRoiRect = Rect(numLeft, numTop, numRight - numLeft, numBottom - numTop);
+		//	numBw=tmpBw(numRoiRect);
+		//	numGray=numGray(numRoiRect);
+		//	//copyMakeBorder(numGray,numGray,2,2,2,2,BORDER_CONSTANT,255);
+		//	////iThresh::Binarization_OstuNiblack(numGray,numBw);
+		//	//threshold(~numGray, numBw, 0, 255,  CV_THRESH_OTSU);
+		//	//numBw=numBw(Rect(2,2,numBw.cols-4,numBw.rows-4));
+		//	//copyMakeBorder(numBw,numBw,2,2,2,2, BORDER_DEFAULT,0);
+		//	//removeErrRegionOfBwImg(numBw);
+		//	//Rect rc;
+		//	//int l,r,t,b;
+		//	//getValidTextRegion(numBw,l,r,t,b);
+		//	//Rect fineNumBwRc=Rect(l,t,r-l,b-t);
+		//	//numBw=numBw(fineNumBwRc);
+		//	LineSegAndRecogForm(0, lOcrHandle, CHAR_NUMPUNC, numBw, numBw, strResult);
+
+		//	retStr.clear();
+		//	fCof = 0.0;
+		//	for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)	{
+		//		if (strResult.vecOcrRectResult[k].strResult.size()){
+		//			retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+		//			fCof += strResult.vecOcrRectResult[k].dbConfi[0];
+		//		}				
+		//	}
+
+		//	if (retStr.size()){
+		//		fCof /= retStr.size();
+		//	}
+		//	else{
+		//		fCof = 0.0f;
+		//	}
+		//	cellResult.str = classToStr<tstring>(retStr);
+		//	cellResult.dcf = fCof;
+		//}
+		//else
+		//{
+		//	//strResult.vecOcrRectResult.clear();
+		//	//LineSegAndRecogForm(0, lOcrHandle, CHAR_CHNPUNC, bw, bw, strResult);
+
+		//	retStr.clear();
+		//	fCof = 0.0;
+		//	for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)	{
+		//		if (strResult.vecOcrRectResult[k].strResult.size()){
+		//			retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+		//			fCof   += strResult.vecOcrRectResult[k].dbConfi[0];
+		//		}				
+		//	}
+
+		//	if (retStr.size()){
+		//		fCof /= retStr.size();
+		//	}
+		//	else{
+		//		fCof = 0.0f;
+		//	}
+		//	//strTmp = classToStr<tstring>(retStr);
+
+		//	/// 真对行添加后处理
+		//	tstring tstrRes = L"";
+		//	tstring preStr = retStr.substr(0,1), curStr;
+		//	for (int i = 1; i < retStr.size(); i++)
+		//	{
+		//		curStr = retStr.substr(i,1);
+
+		//		if (preStr == L"彳" && curStr == L"亍")
+		//		{
+		//			tstrRes.erase(tstrRes.end());
+		//			tstrRes += L"行";
+		//			curStr = L"";
+		//		}
+		//		else{
+		//			tstrRes += preStr;
+		//		}
+
+		//		preStr = curStr;
+		//	}
+		//	tstrRes += preStr;
+		//	retStr = tstrRes;
+		//}
+
+		//strTmp = classToStr(retStr);
+			//if (engine->bUseTextDic)
+			//{
+			//	int nIdx = 0;
+			//	int nDis = getNearestAtomFrmDic(engine->vStrDic, strTmp, nIdx);
+			//	//if (nDis < strTmp.size() / 2)
+			//	{
+			//		strTmp = engine->vStrDic[nIdx];
+			//	}
+			//}
+			/// 后处理机制
+			//if (retStr.size() < 5)
+			//{
+			//	tstring refDic = L"一←÷∈";
+			//	bool bFlag = false;
+			//	for (int i = 0; i < retStr.size(); i++)
+			//	{
+			//		if (refDic.find(retStr[i]) !=string::npos)
+			//		{						
+			//			bFlag = true;
+			//			break;
+			//		}
+			//	}
+			//	if (bFlag == true)
+			//	{					
+			//		retStr = L"";
+			//		fCof = 0.0f;
+			//	}
+			//}
+			//else			
+			//{
+			//	/// 真对行添加后处理
+			//	tstring tstrRes = L"";
+			//	tstring preStr = retStr.substr(0,1), curStr;
+			//	for (int i = 1; i < retStr.size(); i++)
+			//	{
+			//		curStr = retStr.substr(i,1);
+
+			//		if (preStr == L"彳" && curStr == L"亍")
+			//		{
+			//			tstrRes.erase(tstrRes.end());
+			//			tstrRes += L"行";
+			//			curStr = L"";
+			//		}
+			//		else{
+			//			tstrRes += preStr;
+			//		}
+
+			//		preStr = curStr;
+			//	}
+			//	tstrRes += preStr;
+			//	retStr = tstrRes;
+			//}	
+
+			//strTmp = classToStr(retStr);
+
+			cellResult.str = strTmp;
+			cellResult.dcf = fCof;
+		}
+	}
+
+	bool CheckIfTextByBwImage(Mat bwImg, float fThres)
+	{
+		if (bwImg.empty())
+		{
+			return false;
+		}
+
+		int height = bwImg.rows;
+		int width  = bwImg.cols;
+		int edge = 4;
+
+		if (height < 2 * edge || width < 2 * edge)
+		{
+			return false;
+		}
+
+		int nTmp, nMaxColSum = 0, nMaxRowSum = 0;
+
+
+		for (int i = edge; i < width - edge; i++)
+		{
+			nTmp = sum(bwImg.col(i))[0] / 255;
+			if (nTmp > nMaxColSum)
+			{
+				nMaxColSum = nTmp;
+			}
+		}
+
+		for (int i = edge; i < height - edge; i++)
+		{
+			nTmp = sum(bwImg.row(i))[0] / 255;
+			if (nTmp > nMaxRowSum)
+			{
+				nMaxRowSum = nTmp;
+			}
+		}
+
+		// 判决是否文本
+		if (nMaxRowSum < width * fThres && nMaxColSum < height * fThres)
+		{
+			return false;
+		}
+		else
+		{
+			return true;
+		}
+	}
+
+	bool have_black_text_check(const Mat &gray, Mat &bw, int min_val)
+	{
+		if(bw.empty())threshold(gray, bw, 100, 255, THRESH_OTSU);
+		double white_val = 0, white_cnt = 0;
+		double black_val = 0, black_cnt = 0;
+		for (int i = 0; i < gray.rows; ++i)
+		{
+			for (int j = 0; j < gray.cols; ++j)
+			{
+				if (bw.at<uchar>(i, j) == 255)
+				{
+					++black_cnt;
+					black_val += gray.at<uchar>(i, j);
+				}
+				else
+				{
+					++white_cnt;
+					white_val += gray.at<uchar>(i, j);
+				}
+			}
+		}
+		black_val /= black_cnt;
+		white_val /= white_cnt;
+		if (black_cnt == 0 || abs(white_val - black_val) < min_val)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	void checkTextDir(long handle, Mat& gray, Mat& bwImg, vector<Rect>& vCellRect){
+		if (handle <= 0 || gray.empty() || vCellRect.size() == 0)
+		{
+			return;
+		}
+
+		iTableFormEngine* engine = (iTableFormEngine*)handle;
+		if (!engine->bUseTextDirAdjust)
+		{
+			return;
+		}
+
+		int nPos = 0, nNeg = 0;
+		for (int i = 0; i < vCellRect.size(); i++)
+		{
+			Mat grayRoiImg = gray(vCellRect[i]).clone(), bwRoiImg;
+			threshold(grayRoiImg, bwRoiImg, CV_THRESH_OTSU, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+			iLocText::fillEdge(bwRoiImg);
+
+			int nLeft = 0,nTop = 0, nRight = 0, nBottom = 0;
+			if (!getValidTextRegion(bwRoiImg, nLeft, nRight, nTop, nBottom))
+			{
+				continue;
+			}
+
+			Rect roiRect = Rect(nLeft, nTop, nRight - nLeft, nBottom - nTop);
+			grayRoiImg = grayRoiImg(roiRect);
+			bwRoiImg = bwRoiImg(roiRect);
+			if (bwRoiImg.rows >= 35)
+			{
+				Mat element = getStructuringElement(MORPH_RECT, Size(3,3));
+				dilate(bwRoiImg, bwRoiImg, element);
+			}
+
+			if(!CheckIfTextByBwImage(bwRoiImg,0.4) /*|| dThresh > 220*/ || have_black_text_check(grayRoiImg, bwRoiImg, 30) < 0)
+			{
+				continue;
+			}
+
+			//数字+符号识别
+			LineOcrResult strResult, strResult_inv;
+			LineSegAndRecogForm(0, engine->lOcrHandle, CHAR_CHNNUMPUNC,grayRoiImg,bwRoiImg,strResult);
+
+			flip(grayRoiImg, grayRoiImg, 0);
+			flip(bwRoiImg, bwRoiImg, 0);
+			LineSegAndRecogForm(0, engine->lOcrHandle, CHAR_CHNNUMPUNC,grayRoiImg,bwRoiImg,strResult_inv);
+
+			/// 防止识别为空！20170121
+			if (strResult.vecOcrRectResult.size() < 1 || strResult_inv.vecOcrRectResult.size() < 1)
+			{
+				continue;
+			}
+
+			if (strResult.vecOcrRectResult[0].dbConfi[0] > strResult_inv.vecOcrRectResult[0].dbConfi[0] && (strResult.vecOcrRectResult[0].dbConfi[0] > 0.9))
+			{
+				nPos++;
+			}
+			else if (strResult_inv.vecOcrRectResult[0].dbConfi[0] > strResult.vecOcrRectResult[0].dbConfi[0] && (strResult_inv.vecOcrRectResult[0].dbConfi[0] > 0.9))
+			{
+				nNeg++;
+			}
+
+		}
+
+		if (nPos < nNeg)
+		{
+			flip(gray, gray, 0);
+			flip(bwImg, bwImg, 0);
+			int nNum = vCellRect.size();
+			for (int i = 0; i < nNum; i++)
+			{				
+				Rect &rc = vCellRect[i];
+				rc.y = gray.rows - 1 - rc.y - rc.height;
+			}
+
+			sort(vCellRect.begin(), vCellRect.end(), sortRectTopLeft_RecogText);
+		}
+	}
+}

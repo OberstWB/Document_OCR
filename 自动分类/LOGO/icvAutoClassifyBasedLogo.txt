@@ -1,0 +1,49 @@
+#include "stdafx.h"
+#include "icvAutoClassifyBasedLogo.h"
+#include "icvCalcLogoFtr.h"
+
+
+int LogoMatch(const Mat img, ImageTemplate curIT) {
+	Mat descriptorsMat;
+	Mat temdescriptorsMat;
+	vector<Point2f> keypointsQuery;
+	Rect roi = curIT.tLogos[0].LogoSearch;
+	Mat logoImg = img(roi).clone();
+	icvExtractorSiftFtrBasedVlfeat(logoImg, descriptorsMat, keypointsQuery);
+
+	vector<Point2f > matchltpoints;
+	float MatchNum = siftmatch(descriptorsMat, keypointsQuery, curIT.tSiftFtrs[0].desMats, curIT.tSiftFtrs[0].keyPts,8,matchltpoints);
+	float similarity = MatchNum * 100;
+	
+	/// <根据匹配权值进行决策>
+	if (similarity > 80) {
+		return 1;
+	} else {
+		return 0;
+	}		
+}
+
+/// 根据LOGO特征进行模板匹配
+int icvAutoClassifyBasedLOGO(const Mat img, const vector<ImageTemplate> vecIT, vector<int>& vecIndex) {	
+	int nLogoMatchNum = 0;
+	for (int i = 0; i < vecIndex.size(); ++i) {
+		if (vecIndex[i] < 0) {
+			continue;
+		}
+
+		ImageTemplate curIT = vecIT[i];
+		if (curIT.tLogos.size() == 0) {
+			vecIndex[i] = -1;
+			continue;
+		}
+		int nMatchScore = LogoMatch(img, curIT);
+		int nLogoThres = 90;
+		if (nMatchScore < nLogoThres) {
+			vecIndex[i] = -vecIndex[i];
+		}		
+	}
+	vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());
+	return nLogoMatchNum;
+}
+
+

@@ -1,0 +1,17 @@
+#ifndef _ICV_CALC_LOGO_FTR_H_
+#define _ICV_CALC_LOGO_FTR_H_
+
+
+
+/// <调用vlfeat进行sift特征点提取>
+void icvExtractorSiftFtrBasedVlfeat(Mat grayImg, Mat& desMat, vector<Point2f>& keyPts);
+
+
+/// <调用opencv中的features2d和calib3d进行特征点匹配>
+float siftmatch(const Mat& descriptQuery, vector<Point2f> keypointsQuery, 
+				const Mat& descriptProbe, vector<Point2f> keypointsProbe, 
+				int fpointsthre, vector<Point2f>&  matchltpoints);
+
+
+
+#endif

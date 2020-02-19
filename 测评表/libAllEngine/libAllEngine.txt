@@ -1,0 +1,567 @@
+// libAllEngine.cpp : 定义 DLL 应用程序的导出函数。
+//
+
+#include "stdafx.h"
+#include "libAllEngine.h"
+#include "mIvCommon.h"
+#include "OCR_Init.h"
+#include "DcYProcess.h"
+#include "OCREngine.h"
+//#include "MNist.h"
+
+
+
+LIBALLENGINE_API long AllEngine_Init(const char* path)
+{
+	return OCR_init(path);
+}
+
+bool errRect(Rect rc)
+{
+	return (rc.x == -1 || rc.y == -1 || rc.height <= 0 || rc.width <= 0);
+}
+
+
+
+int LinePrintEngine(long handle, Mat tBw, string& strResult, int& conf)
+{
+	Mat tmp = tBw.clone();
+
+	int nHeight = tmp.rows;
+	int nWidth  = tmp.cols;
+
+	morphologyEx(tmp, tmp, MORPH_CLOSE, Mat::ones(3, 3, CV_8UC1));
+	dilate(tmp, tmp, Mat::ones(15, 3, CV_8UC1));
+
+	vector<vector<Point>> contours;
+	findContours(tmp.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+
+	vector<Rect> vRect;
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+		if (rc.height < nHeight / 4)
+		{
+			continue;
+		}
+
+		vRect.push_back(rc);
+	}
+
+	if (vRect.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	sort(vRect.begin(), vRect.end(), sortRectAscendX);
+
+	/// 合并1，重叠合并
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		if (errRect(vRect[i]))
+		{
+			continue;
+		}
+
+		int nIsx = vRect[i].x;
+		int nIex = vRect[i].br().x;
+		int nIsy = vRect[i].y;
+		int nIey = vRect[i].br().y;
+
+		for (int j = i + 1; j < vRect.size(); j++)
+		{
+			if (errRect(vRect[i]))
+			{
+				continue;
+			}
+
+			int nJsx = vRect[j].x;
+			int nJex = vRect[j].br().x;
+			int nJsy = vRect[j].y;
+			int nJey = vRect[j].br().y;
+
+			if ((nIsx <= nJsx&& nJsx < nIex) || (nIsx < nJex&& nJex <= nIex))
+			{
+				vRect[i].x = min(nIsx, nJsx);
+				vRect[i].y = min(nIsy, nJsy);
+				vRect[i].width = max(nIex, nJex) - vRect[i].x;
+				vRect[i].height = max(nIey, nJey) - vRect[i].y;
+
+				vRect[j].x = -1;
+
+				nIsx = vRect[i].x;
+				nIex = vRect[i].br().x;
+				nIsy = vRect[i].y;
+				nIey = vRect[i].br().y;
+			}
+		}
+	}
+
+	vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+
+	if (vRect.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	int nRefHeight = 0;
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		nRefHeight += vRect[i].height;
+	}
+	nRefHeight /= vRect.size();
+
+
+	/// 合并2，非重叠合并
+	for (int i = 0; i < vRect.size();)
+	{
+		if (vRect[i].width < nRefHeight / 2)
+		{
+			if (i == 0 && i < vRect.size() - 1)
+			{
+				if (vRect[i + 1].br().x - vRect[i].x < nRefHeight * 1.1)
+				{					
+					vRect[i + 1].width = max(vRect[i + 1].width, vRect[i + 1].br().x - vRect[i].x);
+					vRect[i + 1].x = vRect[i].x;					
+				}				
+			}
+			else if (i == vRect.size() - 1 && i > 0)
+			{
+				if (vRect[i].br().x - vRect[i - 1].x < nRefHeight * 1.1)
+				{					
+					vRect[i - 1].width = max(vRect[i - 1].width, vRect[i].br().x - vRect[i - 1].x);
+				}		
+			}
+			else if (i > 0 && i < vRect.size() - 1)
+			{
+				if (vRect[i + 1].br().x - vRect[i].x < nRefHeight * 1.1)
+				{					
+					vRect[i + 1].width = max(vRect[i + 1].width, vRect[i + 1].br().x - vRect[i].x);
+					vRect[i + 1].x = vRect[i].x;					
+				}	
+				else if (vRect[i].br().x - vRect[i - 1].x < nRefHeight * 1.1)
+				{					
+					vRect[i - 1].width = max(vRect[i - 1].width, vRect[i].br().x - vRect[i - 1].x);
+				}	
+			}
+			else
+			{
+				break;
+			}
+
+			vRect[i].x = -1;
+			vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+		}
+		else
+		{
+			i++;
+		}
+	}
+
+	vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+
+	if (vRect.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	tstring tResult;
+	conf = 0;
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		if (vRect[i].height < 10)
+		{
+			continue;
+		}
+
+		tstring strChar;
+		long dmin[10];
+		Mat img = tBw(vRect[i]);
+		OCREngine_Char(handle, CHARSET_ALL, img, strChar, dmin);
+		if (strChar.find(L"√") != string::npos)
+		{
+			tResult += L"√";			
+		}
+		else
+		{
+			tResult += strChar.substr(0,1);
+		}
+
+		conf += dmin[0];
+	}
+
+	if (tResult.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	conf /= tResult.size();
+
+	wideStr2shortStr(tResult, strResult);
+
+	return 1;
+}
+
+int hwDigitEngine(long handle, Mat& tmp, Mat tBw, int iDigitNum, string& stringResStr, int& conf)
+{
+	if (handle<=0||tmp.empty()||tBw.empty())
+	{
+		return -1;
+	}
+	if (DigitalEngine(handle, tmp, iDigitNum, stringResStr, conf) < 0)
+	{
+		tBw.copyTo(tmp(Range(1, tmp.rows-1), Range(1,tmp.cols-1)));
+		DigitalEngine(handle, tmp, iDigitNum, stringResStr, conf);
+	}
+	if ((stringResStr.size() == 2 && stringResStr.substr(1,1) != "0") || stringResStr.size() > 2)
+	{
+		tBw.copyTo(tmp(Range(1, tmp.rows-1), Range(1,tmp.cols-1)));
+		DigitalEngine(handle, tmp, iDigitNum, stringResStr, conf);
+		if (stringResStr.size() >= 2)
+		{
+			stringResStr = stringResStr.substr(0, 2);
+		}
+	}
+	return 0;
+}
+LIBALLENGINE_API int  AllEngine_Classify(long handle, int nType, const Mat& tBw,string &ResStr,int &conf, int iDigitNum)
+{
+	if (tBw.empty())
+	{
+		return -1;
+	}
+
+	stRecogEngine* ptr = (stRecogEngine*)handle;
+
+	Mat tmp = Mat::zeros(tBw.rows+2, tBw.cols+2, tBw.type());
+	tBw.copyTo(tmp(Range(1, tmp.rows-1), Range(1,tmp.cols-1)));
+
+	switch (nType)
+	{
+	case CHAR_DICR:
+		/*		{
+		vector<vector<Point>> contours;
+		findContours(tmp.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+
+		if (contours.size() > 1)
+		{
+		vector<Rect> vRect;
+		int nRefHeight = 0;
+		int nRefWidth = 0;
+		for (int i = 0; i < contours.size(); i++)
+		{
+		vRect.push_back(boundingRect(contours[i]));
+		nRefHeight = IVMAX(vRect[i].height, nRefHeight);
+		nRefWidth = IVMAX(vRect[i].width, nRefWidth);
+		}
+
+		sort(vRect.begin(), vRect.end(), sortRectAscendX);
+
+		for (int i = 0; i < vRect.size(); i++)
+		{
+		if (vRect[i].height < nRefHeight * 0.2)
+		{
+		bool bFlag = false;
+		for (int j = 0; j < vRect.size(); j++)
+		{
+		if (j == i)
+		{
+		continue;
+		}
+		if ((vRect[i].x < vRect[j].br().x) && (vRect[i].x > vRect[j].x)
+		|| (vRect[i].br().x < vRect[j].br().x) && (vRect[i].br().x > vRect[j].x))
+		{
+		bFlag = true;
+		break;
+		}
+		}
+
+		if (!bFlag)
+		{
+		tmp(vRect[i]) = 0;
+		}
+		}
+		}
+		}
+		}	*/	
+
+		//{
+		//	vector<vector<Point>> contours;
+		//	findContours(tmp.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+		//	if (contours.size() > 1)
+		//	{
+		//		vector<Rect> vRect;
+		//		int nRefHeight = 0;
+		//		int nRefWidth = 0;
+		//		for (int i = 0; i < contours.size(); i++)
+		//		{
+		//			vRect.push_back(boundingRect(contours[i]));
+		//			nRefHeight = IVMAX(vRect[i].height, nRefHeight);
+		//			nRefWidth = IVMAX(vRect[i].width, nRefWidth);
+		//		}
+
+		//		sort(vRect.begin(), vRect.end(), sortRectAscendX);
+		//		for (int i = 0; i < vRect.size(); i++)
+		//		{
+		//			if (errRect(vRect[i]))
+		//			{
+		//				continue;
+		//			}
+		//			for (int j = 0; j < vRect.size(); j++)
+		//			{
+		//				if (errRect(vRect[j]) || i == j)
+		//				{
+		//					continue;
+		//				}
+		//				if (vRect[j].x >= vRect[i].x && vRect[j].br().x <= vRect[i].br().x)
+		//				{
+		//					vRect[j].x = -1;
+		//				}
+		//			}
+		//		}
+
+		//		vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+		//		sort(vRect.begin(), vRect.end(), sortRectDscendArea);
+
+		//		for (int i = 1; i < vRect.size(); i++)
+		//		{					
+		//			if (vRect[i].x > vRect[0].x && vRect[i].x <= vRect[0].br().x + vRect[0].width / 4)
+		//			{
+		//				continue;
+		//			}
+
+		//		/*	if ((vRect[i].height < vRect[0].height * 0.5) || ((vRect[i].br().y + vRect[i].y)/2 < vRect[0].y) || ((vRect[i].br().y + vRect[i].y)/2 > vRect[0].br().y))//20180208王博屏蔽
+		//			{
+		//				tmp(vRect[i]) = 0;
+		//			}*/
+		//		}
+		//	}
+		//}
+
+		//int nRet = DigitalEngine(ptr->HWNumHandle, tmp, iDigitNum, ResStr, conf);
+		//bool ret=MNIST_Calculate(tmp,ResStr,conf);
+		return hwDigitEngine(ptr->HWNumHandle,tmp,tBw,iDigitNum,ResStr,conf);
+		break;
+
+	case CHAR_RICR: 
+		return ChineseEngine(ptr->HWCHNHandle, tmp, ResStr, conf);
+		break;
+
+	case CHAR_UICR:
+		return LegalAmountEngine(ptr->LegalDateHandle, tmp, ResStr, conf);
+		break;
+
+	case CHAR_LICR:
+		return CourtesyAmountEngine(ptr->HWCourtesyHandle, tmp, ResStr, conf);
+		break;
+
+	case CHAR_LINE:
+		return LinePrintEngine(ptr->npntrHandle, tmp, ResStr, conf);
+		break;
+
+	default:
+		return -1;
+		break;
+	}
+}
+
+int FieldClassify(long handle, const Mat tBw, vector<string>& vStrResult, int& conf)
+{
+	stRecogEngine* ptr = (stRecogEngine*)handle;
+
+	Mat tmp = tBw.clone();
+
+	int nHeight = tmp.rows;
+	int nWidth  = tmp.cols;
+
+	dilate(tmp, tmp, Mat::ones(15, 1, CV_8UC1));
+
+	vector<vector<Point>> contours;
+	findContours(tmp.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+
+	vector<Rect> vRect;
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+		if (rc.height < nHeight / 4)
+		{
+			continue;
+		}
+
+		vRect.push_back(rc);
+	}
+
+	if (vRect.size() < 1)
+	{
+		vStrResult.clear();
+		conf = 0;
+		return 0;
+	}
+
+	sort(vRect.begin(), vRect.end(), sortRectAscendX);
+
+	/// 合并1，重叠合并
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		if (errRect(vRect[i]))
+		{
+			continue;
+		}
+
+		int nIsx = vRect[i].x;
+		int nIex = vRect[i].br().x;
+		int nIsy = vRect[i].y;
+		int nIey = vRect[i].br().y;
+
+		for (int j = i + 1; j < vRect.size(); j++)
+		{
+			if (errRect(vRect[i]))
+			{
+				continue;
+			}
+
+			int nJsx = vRect[j].x;
+			int nJex = vRect[j].br().x;
+			int nJsy = vRect[j].y;
+			int nJey = vRect[j].br().y;
+
+			if ((nIsx <= nJsx&& nJsx < nIex) || (nIsx < nJex&& nJex <= nIex))
+			{
+				vRect[i].x = min(nIsx, nJsx);
+				vRect[i].y = min(nIsy, nJsy);
+				vRect[i].width = max(nIex, nJex) - vRect[i].x;
+				vRect[i].height = max(nIey, nJey) - vRect[i].y;
+
+				vRect[j].x = -1;
+
+				nIsx = vRect[i].x;
+				nIex = vRect[i].br().x;
+				nIsy = vRect[i].y;
+				nIey = vRect[i].br().y;
+			}
+		}
+	}
+
+	vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+
+	if (vRect.size() < 1)
+	{
+		vStrResult.clear();
+		conf = 0;
+		return 0;
+	}
+
+	tstring tResult;
+	int nRefMax = 0;
+	vector<int> vIntDist;
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		tstring strChar;
+		long dmin[10] = {0};
+		Mat img = tBw(vRect[i]);
+		OCREngine_Char(ptr->npntrHandle, CHARSET_ALL, img, strChar, dmin);
+
+		tResult += strChar.substr(0,1);
+		if (vRect[i].width > vRect[i].height * 0.5)
+		{
+			vIntDist.push_back(vRect[i].width);
+		}		
+	}
+
+	nRefMax = ivGetMedianValue(vIntDist);
+
+	/// 通过识别结果查找分隔符":"
+	string::size_type nIdx = tResult.find(classToWStr(":"));
+	if (nIdx != string::npos)
+	{
+		tBw(Range(0, tBw.rows), Range(0, vRect[nIdx].br().x)) = 0;
+		for (int i = 0; i <= nIdx; i++)
+		{
+			vRect[i].x = -1;
+		}
+
+		vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+
+	}
+	else
+	{		
+		std::cout<< "Can't find Char ':'!" <<std::endl;
+	}
+
+	if (vRect.size() < 1)
+	{
+		vStrResult.clear();
+		conf = 0;
+		return 0;
+	}
+
+	/// 区域划分
+	bool bBigSpace = false;
+	nRefMax = nRefMax * 2;
+	vector<int> vIntIdx;
+	for (int i = 0; i < vRect.size() - 1; i++)
+	{
+		if (vRect[i + 1].x - vRect[i].x > nRefMax)
+		{
+			bBigSpace = true;
+			vIntIdx.push_back(i);
+		}
+	}
+
+	vStrResult.clear();
+
+	if (!bBigSpace || vIntIdx.size() < 2)
+	{
+		string strResult;
+		AllEngine_Classify(handle, CHAR_LINE, tBw, strResult, conf);
+		vStrResult.push_back(strResult);
+	}
+	else
+	{
+		if (vIntIdx.size() > 2)
+		{
+			while(vIntIdx.size() > 2)
+			{
+				int nMin = vRect[vIntIdx[0] + 1].x - vRect[vIntIdx[0]].x;
+				int nIdx = 0;
+				for (int i = 1; i < vIntIdx.size(); i++)
+				{
+					if (vRect[vIntIdx[i] + 1].x - vRect[vIntIdx[i]].x < nMin)
+					{
+						nIdx = i;
+					}
+				}
+				vIntIdx.erase(vIntIdx.begin() + nIdx);
+			}
+		}
+
+		Mat lefImg = tBw(Range(0, tBw.rows), Range(0, vRect[vIntIdx[0]].br().x));
+		Mat midImg = tBw(Range(0, tBw.rows), Range(vRect[vIntIdx[0]].br().x, vRect[vIntIdx[1]].br().x));
+		Mat rigImg = tBw(Range(0, tBw.rows), Range(vRect[vIntIdx[1]].br().x, tBw.cols));
+
+		string strlefResult, strmidResult, strrigResult;
+		int lefconf = 0, midconf = 0, rigconf = 0;
+		AllEngine_Classify(handle, CHAR_LINE, lefImg, strlefResult, lefconf);
+		AllEngine_Classify(handle, CHAR_LINE, midImg, strmidResult, midconf);
+		AllEngine_Classify(handle, CHAR_LINE, rigImg, strrigResult, rigconf);
+
+		vStrResult.push_back(strlefResult);
+		vStrResult.push_back(strmidResult);
+		vStrResult.push_back(strrigResult);
+		conf = (lefconf + midconf + rigconf) / 3;
+	}
+}
+
+LIBALLENGINE_API void AllEngine_UnInit(long& handle)
+{
+	OCR_uinit(handle);
+	handle = 0;
+}

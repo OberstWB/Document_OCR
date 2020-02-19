@@ -1,0 +1,3401 @@
+// fiv_table_ocr.cpp : 定义 DLL 应用程序的导出函数。
+//
+
+#include "stdafx.h"
+#include "fiv_table_ocr.h"
+#include <list>
+#include "OCREngine.h"
+
+
+typedef struct  
+{
+	double x,y;
+
+}SHAPE_POINT;
+
+typedef struct
+{
+	SHAPE_POINT tTopLeft;
+	SHAPE_POINT tButtomRight;
+
+}SHAPE_RECT;
+
+typedef vector<SHAPE_RECT> RECTS;
+
+typedef struct ////每个SHAPE_RECT的识别结果
+{
+	SHAPE_RECT imgRect;			/////图像区域
+	tstring strResult;			/////识别结果（多个备选，每个备选一个字符）
+	vector<double> dbConfi;		//////每个备选的置信度
+}OcrRectResult;
+
+typedef struct ////行识别结果
+{
+	vector<OcrRectResult> vecOcrRectResult; /////每个区域的识别结果组成一个vector
+
+}LineOcrResult;
+
+
+typedef struct  
+{
+	SHAPE_RECT tRect;
+	tstring    strOcrResult;
+	double     dbConfidence;
+	long       lDist;
+	long       lDmin[10];
+	//int         labels;
+
+}stOcrRect;
+
+typedef vector<stOcrRect> stOcrRectList;
+
+typedef struct
+{
+	SHAPE_RECT tRect;
+	list<vector<Point>> tContours;
+
+}stRectContour;
+
+typedef list<stRectContour> stContourRects;
+
+typedef struct _tagLineSegParam
+{
+	int iPixelTh;
+	double dbRatioTh;
+	long lMaxDist;
+	double lDistRatio;
+	long lMaxHigh;
+	long lMaxWidth;
+	bool bDebug;
+	_tagLineSegParam(){
+		iPixelTh   = 10;
+		dbRatioTh  = 1.23;
+		lMaxDist   = 80000;
+		lDistRatio = 0.8;
+		lMaxHigh   = 50;
+		lMaxWidth  = 100;
+	}
+}stLineSegmentationParam;
+
+typedef bool (*MyOcrEngine)(long hHandle,int iType,const Mat &tBwChar,tstring &strChar,long dmin[10]);
+bool SegAndReg(long hHandle, int iType, MyOcrEngine p, const Mat &tImage, const Mat &tBwChar, LineOcrResult &regResult);
+int ProcessAmount(long tHandles,const Mat& tsrcImg,const Mat& tBwImg,LineOcrResult& strResult);
+
+/// 加载识别引擎
+long fIv_table_ocr_init(string modelPath){
+	string DicName = modelPath + "/A11052Trn-filter.dic";
+	long npntrHandle = OCREngine_LoadDic(DicName);
+	if (npntrHandle <=0 ) {
+		return 0;
+	}
+
+	return npntrHandle;
+}
+
+/// 识别引擎释放
+void fIv_table_ocr_uninit(long& handle){
+	if (handle > 0) {
+		OCREngine_FreeDic(handle);
+	}
+
+	handle = 0;
+}
+
+/// 按照方法类型进行字符识别
+int printChinese_classify(long handle, int nType, Mat bwImg, string& str, float& dcf){
+	if (handle <= 0) {
+		return -1;
+	}
+
+	if (bwImg.empty()) {
+		return -1;
+	}
+	
+	MyOcrEngine p = OCREngine_Char;
+
+	int dataSetType = 0;
+	if (nType == FIV_TABLE_CHAR_NUMPUNC)
+		dataSetType = 1;	
+
+	LineOcrResult strResult;
+	SegAndReg(handle, dataSetType, p, bwImg, bwImg, strResult);
+
+	/// 后处理
+	if (nType == FIV_TABLE_CHAR_NUMPUNC) {
+		ProcessAmount(handle, bwImg, bwImg, strResult);
+	}
+
+	/// convert string to tstring
+	tstring retStr = L"";
+	float fCof = 0;
+	for (int k = 0; k < strResult.vecOcrRectResult.size(); k++)	{
+		if (strResult.vecOcrRectResult[k].strResult.size())	{
+			retStr += strResult.vecOcrRectResult[k].strResult.substr(0,1);
+			fCof += strResult.vecOcrRectResult[k].dbConfi[0];
+		}			
+	}
+
+	if (retStr.size()){
+		fCof /= retStr.size();
+	}
+	else{
+		fCof = 0.0f;
+	}
+	
+	dcf = fCof;
+	str += classToStr<tstring>(retStr);	
+
+	return 1;
+}
+
+void RunLength(Mat &tBwImage,int val,vector<int> &LH,vector<int> &LV)
+{
+	int iHeight = tBwImage.rows;
+	int iWidth  = tBwImage.cols;
+	int iMaxLen = MAX(iHeight,iWidth);
+
+	LH.resize(iMaxLen+1);
+	LV.resize(iMaxLen+1);
+
+	for(int i=0; i<(iMaxLen+1);i++) 
+	{
+		LH[i] = 0;
+		LV[i] = 0;
+	}
+
+	int state = 0;
+	int len   = 0;
+	int lastp = 1;
+	int i,j;
+
+	for(int i=0; i<iHeight;i++) 
+	{
+		state = 0;
+		len   = 0;
+		lastp = 1;
+
+		for(int j=0; j<iWidth; j++ ) 
+		{
+
+			if(state == 0)
+			{
+				if( tBwImage.at<uchar>(i,j) == val )
+				{
+					state = 1;
+					lastp = j;
+				}
+			}
+			else
+			{
+				if( tBwImage.at<uchar>(i,j) != val )
+				{
+					state = 0;
+					len = j-lastp;
+					LH[len] = LH[len]+1;
+				}
+
+			}//if(state == 0) else
+
+		}//for(int j=0; j<iWidth; j++ ) 
+
+	}//for(int i=0; i<iHeight;i++) 
+
+
+	for( j=0; j<iWidth; j++ )
+	{
+
+		state = 0;
+		len   = 0;
+		lastp = 1;
+
+		for(i=0; i<iHeight; i++) 
+		{
+
+			if(state == 0)
+			{
+				if( tBwImage.at<uchar>(i,j) == val )
+				{
+					state = 1;
+					lastp = i;
+				}   
+			}
+			else
+			{
+				if( tBwImage.at<uchar>(i,j) != val )
+				{
+					state = 0;
+					len = i-lastp;
+					LV[len] = LV[len]+1;
+				}
+			}//if(state == 0) else
+		}//for(i=0; i<iHeight; i++) 
+
+	}//for( j=0; j<iWidth; j++ )
+	return;
+}
+
+void GetRunLengthStat(Mat &tBwImage,int &iASWF,int &iASWB)
+{
+	/*DEBUG("");*/
+	vector<int> tLHForeground,tLVForeground,tLHBackground,tLVBackground;
+	int iForegroundVal = 255; 
+	int iBackgroundVal = 0; 
+
+	RunLength(tBwImage,iForegroundVal,tLHForeground,tLVForeground);
+	RunLength(tBwImage,iBackgroundVal,tLHBackground,tLVBackground);
+
+	//int iASWF,iASWB;
+	int iMaxRLF=0,iMaxRLFIdx=0,iMaxRLB=0,iMaxRLBIdx=0;
+
+	int iLen = tLHForeground.size();
+	vector<int> tRLForeground(iLen),tRLBackground(iLen);
+
+	iMaxRLF = 0;
+	iMaxRLB = 0;
+
+	for ( int i= 0; i<iLen; i++ )
+	{
+		tRLForeground[i] = tLHForeground[i]+tLVForeground[i];
+		tRLBackground[i] = tLHBackground[i]+tLVBackground[i];
+
+		if ( tRLForeground[i] > iMaxRLF )
+		{
+			iMaxRLF    = tRLForeground[i];
+			iMaxRLFIdx = i;
+		}
+
+		if ( tRLBackground[i] > iMaxRLB )
+		{
+			iMaxRLB    = tRLBackground[i];
+			iMaxRLBIdx = i;
+		}
+
+	}//for ( int i= 0; i<iLen; i++ )
+
+	iASWF = iMaxRLFIdx;
+	iASWB = iMaxRLBIdx;
+	/*DEBUG("");*/
+}
+
+int IsSalt(Mat &tBw,int iPixelTh)
+{
+	/*DEBUG("");*/
+	vector<vector<Point>> contours;
+	vector<Vec4i> hierarchy;
+
+	Mat tBwImageTmp;
+	tBw.copyTo(tBwImageTmp);
+
+	findContours(tBwImageTmp, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+	//findContours(tBwImageTmp, contours , hierarchy , CV_RETR_TREE , CV_CHAIN_APPROX_NONE,Point(0, 0)); //查找连通区域
+
+
+	double dbArea = 0;
+	SHAPE_RECT tRect;
+
+	int iNum = 0;
+
+	if (!contours.empty())
+	{
+		//for (int idx=0;idx>=0;idx=hierarchy[idx][0])
+		for (int idx=0;idx<contours.size();idx++)
+		{
+			Rect cBoundingBox = boundingRect(Mat(contours[idx]));
+
+			Mat tRectImg = tBw(Range(cBoundingBox.y,cBoundingBox.y + cBoundingBox.height), 
+				Range(cBoundingBox.x,cBoundingBox.x + cBoundingBox.width));
+
+			//ShowMat(tRectImg);
+
+			dbArea = contourArea(contours[idx]);
+
+			if ( dbArea < iPixelTh )
+			{
+				iNum++;
+				continue;
+			}
+
+			/*			ShowMat(tRectImg,"conn",true);*/
+
+		}//for (int idx=0;idx>=0;idx=hierarchy[idx][0])
+	}//if (!contours.empty())
+
+	/*DEBUG("Done");*/
+	return iNum;
+
+}
+
+void ConnComponent(Mat &tBw,int iPixelTh,stContourRects &tContourRects,bool bFill,uchar cFillVal,Mat &tFilledImg)
+{
+	/*DEBUG("");*/
+	vector<vector<Point>> contours;
+	vector<Vec4i> hierarchy;
+
+	Mat tBwImageTmp;
+	tBw.copyTo(tBwImageTmp);
+
+
+	findContours(tBwImageTmp, contours , hierarchy , CV_RETR_TREE , CV_CHAIN_APPROX_NONE,Point(0, 0)); //查找连通区域
+
+
+	double dbArea = 0;
+	SHAPE_RECT tRect;
+
+	stRectContour tRectContour;
+
+	int iNum = 0;
+
+	tContourRects.clear();
+
+	if (!contours.empty())
+	{
+		for (int idx=0;idx>=0;idx=hierarchy[idx][0])
+			//for (int idx=0;idx<contours.size();idx++)
+		{
+			Rect cBoundingBox = boundingRect(Mat(contours[idx]));
+
+			Mat tRectImg = tBw(Range(cBoundingBox.y,cBoundingBox.y + cBoundingBox.height), 
+				Range(cBoundingBox.x,cBoundingBox.x + cBoundingBox.width));
+
+			//ShowMat(tRectImg);
+
+			dbArea = contourArea(contours[idx]);
+
+			if ( dbArea < iPixelTh )
+			{
+				if ( bFill )
+				{
+					Point pt;
+					for ( int i=0; i<contours[idx].size(); i++ )
+					{
+						pt = contours[idx][i];
+						tFilledImg.at<uchar>(pt.y,pt.x) = cFillVal;
+					}
+
+				}//if ( bFill )
+
+				continue;
+			}
+
+			/*			ShowMat(tRectImg,"conn",true);*/
+
+			tRectContour.tRect.tTopLeft.x = cBoundingBox.x;
+			tRectContour.tRect.tTopLeft.y = cBoundingBox.y;
+			tRectContour.tRect.tButtomRight.x = tRectContour.tRect.tTopLeft.x + cBoundingBox.width-1;
+			tRectContour.tRect.tButtomRight.y = tRectContour.tRect.tTopLeft.y + cBoundingBox.height-1;
+
+			tRectContour.tContours.clear();
+			tRectContour.tContours.push_back(contours[idx]);
+
+			tContourRects.push_back(tRectContour);
+
+			//iNum++;
+			//sprintf(ch,"%d",iNum);
+			//string str = "Connection";
+			//str = str + ch;
+			//ShowMat(tRectImg,str);
+
+		}//for (int idx=0;idx>=0;idx=hierarchy[idx][0])
+	}//if (!contours.empty())
+
+	/*DEBUG("");*/
+	return;
+}
+
+void RunRectLength(const RECTS &tRect,int iWidth,int &iASWR)
+{
+	/*DEBUG("");*/
+	vector<int> L(iWidth);
+
+	int iSpan;
+
+	if ( tRect.size() < 2)
+	{
+		iASWR = 0;
+		return;
+	}
+
+	for(int i=0; i<iWidth;i++) 
+	{
+		L[i] = 0;
+	}
+
+	for(int i=0; i<tRect.size()-1;i++) 
+	{
+		iSpan = int(tRect[i+1].tTopLeft.x - tRect[i].tButtomRight.x);
+		if ( iSpan >= 0 )
+		{
+			L[iSpan]++;
+		}
+
+	}//for(int i=0; i<iHeight;i++) 
+
+	vector<int>::iterator pos = max_element(L.begin(),L.end());
+
+	iASWR = distance(L.begin(),pos);
+
+	/*DEBUG("");*/
+	return;
+
+}
+
+void ConnComponent(Mat &tBw,int iPixelTh,RECTS &tRects,vector<double> &tConnAreas,bool bFill,uchar cFillVal,Mat &tFilledImg)
+{
+	vector<vector<Point>> contours;
+	vector<Vec4i> hierarchy;
+
+	// 	Mat tBwImageTmp = Mat::zeros(tBw.rows+2,tBw.cols+2,CV_8UC1);
+	// 	Mat tBwImageTmp1 = tBwImageTmp(Range(1,tBw.rows+1),Range(1,tBw.cols+1));
+	// 	tBw.copyTo(tBwImageTmp(Range(1,tBw.rows+1),Range(1,tBw.cols+1)));
+	Mat tBwImageTmp;
+	tBw.copyTo(tBwImageTmp);
+
+	findContours(tBwImageTmp, contours , hierarchy , CV_RETR_TREE , CV_CHAIN_APPROX_NONE,Point(0, 0)); //查找连通区域
+
+
+	double dbArea = 0;
+	SHAPE_RECT tRect;
+
+	int iNum = 0;
+
+	if (!contours.empty())
+	{
+		for (int idx=0;idx>=0;idx=hierarchy[idx][0])
+			//for (int idx=0;idx<contours.size();idx++)
+		{
+			Rect cBoundingBox = boundingRect(Mat(contours[idx]));
+
+			// 			Mat tRectImg = tBw(Range(cBoundingBox.y,cBoundingBox.y + cBoundingBox.height), 
+			// 				               Range(cBoundingBox.x,cBoundingBox.x + cBoundingBox.width));
+
+			//ShowMat(tRectImg);
+
+			dbArea = contourArea(contours[idx]);
+
+			if ( dbArea < iPixelTh )
+			{
+				if ( bFill )
+				{
+					Point pt;
+					for ( int i=0; i<contours[idx].size(); i++ )
+					{
+						pt = contours[idx][i];
+						tFilledImg.at<uchar>(pt.y,pt.x) = cFillVal;
+					}
+
+				}//if ( bFill )
+
+				continue;
+			}
+
+			/*			ShowMat(tRectImg,"conn",true);*/
+
+			tRect.tTopLeft.x = cBoundingBox.x;
+			tRect.tTopLeft.y = cBoundingBox.y;
+			tRect.tButtomRight.x = tRect.tTopLeft.x + cBoundingBox.width-1;
+			tRect.tButtomRight.y = tRect.tTopLeft.y + cBoundingBox.height-1;
+			tRects.push_back(tRect);
+			tConnAreas.push_back(dbArea);
+
+			//iNum++;
+			//sprintf(ch,"%d",iNum);
+			//string str = "Connection";
+			//str = str + ch;
+			//ShowMat(tRectImg,str);
+
+		}//for (int idx=0;idx>=0;idx=hierarchy[idx][0])
+	}//if (!contours.empty())
+
+	return;
+}
+
+bool CmpRectByXPosAscend( const SHAPE_RECT &tRect1, const SHAPE_RECT &tRect2 )
+{
+	return (tRect1.tTopLeft.x < tRect2.tTopLeft.x);
+}
+
+bool CmpOcrRectByXPosAscend( const OcrRectResult &tOcrRect1, const OcrRectResult &tOcrRect2 ) //升序
+{
+	return CmpRectByXPosAscend(tOcrRect1.imgRect,tOcrRect2.imgRect);
+}
+
+bool CmpOcrRectListByXPosAscend( const stOcrRect &tOcrRect1, const stOcrRect &tOcrRect2 ) //升序
+{
+	return CmpRectByXPosAscend(tOcrRect1.tRect, tOcrRect2.tRect);
+}
+
+bool FilterSmallDot(Mat &tImage,Mat &tBwImage,int &iASWF,int &iASWB,int &iASWR)
+{
+	Mat tBw;
+	tBwImage.copyTo(tBw);
+	Mat tBw1;
+	tBw1 = tBw;
+	//medianBlur ( tBw, tBw1, 3 );
+
+	GetRunLengthStat(tBw1,iASWF,iASWB);
+
+	if ( (0==iASWF) || (0==iASWB) )
+	{
+		return false;
+	}
+
+	int iSum = IsSalt(tBw,10);
+	if ( iSum > 50 )
+	{
+		medianBlur ( tBw, tBw1, 3 );
+
+		tBw = tBw1;
+	}
+	RECTS tRects;
+	vector<double> tConnAreas;
+	Mat tFilledImg = tBw;
+
+	int iMinArea = MAX(iASWF*iASWF,4);
+	iMinArea = MIN(iASWF*iASWF,10);
+
+	ConnComponent(tBw,1,tRects,tConnAreas,true,0,tFilledImg);
+	
+	tBwImage = tFilledImg;
+
+	sort(tRects.begin(),tRects.end(),CmpRectByXPosAscend);
+
+	RunRectLength(tRects,tBw.cols,iASWR);
+	GetRunLengthStat(tFilledImg,iASWF,iASWB);
+
+	return true;
+
+}
+
+void MergeRectByOverlap(const RECTS &tRects,RECTS &tMergedRects,double dbOverlapTh)
+{
+	/*DEBUG("");*/
+	RECTS tRectsTmp;
+	tRectsTmp = tRects;
+
+	double xs,ys,xe,ye;
+	int i,iNumBox;
+
+	double xs1,ys1,xe1,ye1,xsm,ysm,xem,yem;
+	double height1,width1,Ratio1,square1;
+	double height2,width2,Ratio2,square2;
+	double Uheight,Uwidth,Uratio;
+	double Oheight,Owidth,Osquare;
+
+	bool bVerticalOverlaped;
+	bool bAreaOverlaped;
+	bool bTooDiv;
+
+	int j;
+	int merged;
+
+	double dbMinLow = 100000,dbMaxHight = 0;
+	iNumBox = tRectsTmp.size();
+	/*DEBUG("");*/
+	for( i=0; i<iNumBox; i++ )
+	{
+
+		xs = tRectsTmp[i].tTopLeft.x;
+		ys = tRectsTmp[i].tTopLeft.y;
+		xe = tRectsTmp[i].tButtomRight.x;
+		ye = tRectsTmp[i].tButtomRight.y;   
+
+		if ( (ys < dbMinLow) &&(ys > 0)  )
+		{
+			dbMinLow = ys;
+		}
+		if ( ye > dbMaxHight  )
+		{
+			dbMaxHight = ye;
+		}
+
+		if( (xs == 0) && (ys == 0) && (xe == 0) && (ye == 0) )
+		{
+			continue;
+		}
+
+		//for( j=i+1; (j<i+2)&&(j<iNumBox); j++ )  //实际上应该只和周围的box合并
+		for( j=i+1; j<iNumBox; j++ )  //实际上应该只和周围的box合并
+		{
+
+			xs = tRectsTmp[i].tTopLeft.x;
+			ys = tRectsTmp[i].tTopLeft.y;
+			xe = tRectsTmp[i].tButtomRight.x;
+			ye = tRectsTmp[i].tButtomRight.y;   
+
+			xs1 = tRectsTmp[j].tTopLeft.x;
+			ys1 = tRectsTmp[j].tTopLeft.y;
+			xe1 = tRectsTmp[j].tButtomRight.x;
+			ye1 = tRectsTmp[j].tButtomRight.y;         
+
+			if( (xs1 == 0) && (ys1 == 0) && (xe1 == 0) && (ye1 == 0) )
+			{
+				continue;
+			}
+
+			xsm = MIN(xs,xs1);
+			xem = MAX(xe,xe1);
+			ysm = MIN(ys,ys1);
+			yem = MAX(ye,ye1);   
+
+			height1 = ye-ys+1;
+			width1 = xe-xs+1;
+			Ratio1 = width1 / height1;
+			square1 = width1*height1;
+
+			height2 = ye1-ys1+1;
+			width2 = xe1-xs1+1;
+			Ratio2 = width2 / height2;
+			square2 = width2*height2;
+
+			Uwidth = MAX(xe,xe1)-MIN(xs,xs1)+1;
+			Uheight = MAX(ye,ye1)-MIN(ys,ys1)+1;
+
+			Uratio = Uwidth / Uheight;
+
+			Owidth = width1 + width2 - Uwidth ;
+			Oheight = height1 + height2 - Uheight;
+
+			Osquare = Owidth * Oheight;
+
+			merged = 0;
+
+			//bAreaOverlaped    = ((Owidth > 0)&&(Oheight > 0));
+			bAreaOverlaped    = ((Owidth > 1)&&(Oheight > 1));
+
+			if ( (bAreaOverlaped) && 
+				/*((Osquare / MIN(square1,square2)) > dbOverlapTh) &&*/		// wspeng，重叠判定条件有问题，20160630
+				( abs(height1-height2) < 5*MIN(height1,height2)) &&
+				( abs(width1-width2) < 5*MIN(width1,width2))
+				) 
+			{
+				merged = 1;
+
+			}// if (  bAreaOverlaped  ) 
+
+			if( 1 == merged )
+			{
+
+				tRectsTmp[i].tTopLeft.x     = xsm;
+				tRectsTmp[i].tTopLeft.y     = ysm;
+				tRectsTmp[i].tButtomRight.x = xem;
+				tRectsTmp[i].tButtomRight.y = yem;   
+
+				tRectsTmp[j].tTopLeft.x     = 0;
+				tRectsTmp[j].tTopLeft.y     = 0;
+				tRectsTmp[j].tButtomRight.x = 0;
+				tRectsTmp[j].tButtomRight.y = 0;   
+
+			}//if( 1 == merged )
+
+		}//end% for j=i+1:numbox
+	}//end % for i=1:numbox
+	/*DEBUG("");*/
+	tMergedRects.clear();
+
+	SHAPE_RECT tRect;
+	for( i=0; i<iNumBox; i++ )
+	{
+
+		xs = tRectsTmp[i].tTopLeft.x;
+		ys = tRectsTmp[i].tTopLeft.y;
+		xe = tRectsTmp[i].tButtomRight.x;
+		ye = tRectsTmp[i].tButtomRight.y;   
+
+		if( (xs == 0) && (ys == 0) && (xe == 0) && (ye == 0) )
+		{
+			continue;
+		}
+
+
+		tRect.tTopLeft.x     = xs;
+		tRect.tTopLeft.y     = ys;
+		tRect.tButtomRight.x = xe;
+		tRect.tButtomRight.y = ye;
+		tMergedRects.push_back(tRect);
+
+	}//for( i=0; i<iNumBox; i++ )
+	/*DEBUG("D");*/
+	return;
+}
+
+void ComputeRect(const SHAPE_RECT &tRect,double &dbHeight,double &dbWidth,double &dbRatio,double &dbCenterX,double &dbCenterY)
+{
+	/*DEBUG("");*/
+	dbWidth  = tRect.tButtomRight.x - tRect.tTopLeft.x;
+	dbHeight = tRect.tButtomRight.y - tRect.tTopLeft.y;
+
+	dbRatio = 0;
+	if ( dbHeight > 0.01 )
+	{
+		dbRatio  = dbWidth/dbHeight;
+	}
+
+
+	dbCenterX = tRect.tTopLeft.x + dbWidth/2;
+	dbCenterY = tRect.tTopLeft.y + dbHeight/2;
+	/*DEBUG("D");*/
+}
+
+void StatRect(const RECTS &tRects,RECTS &tRectsFiltered,double &dbAveWidth,double &dbAveHigh,double &dbAveRatio,double &dbAveDist,double &dbAveCenterX,double &dbAveCenterY)
+{
+	double dbWidth,dbHeight,dbCenterX,dbCenterY,dbRatio;
+	SHAPE_RECT tPrevRect;
+
+	int i;
+
+	dbAveWidth = 0;
+	dbAveHigh  = 0;
+	dbAveRatio = 0;
+	dbAveDist  = 0;
+	dbAveCenterX = 0;
+	dbAveCenterY = 0;
+
+	double dbNum;
+
+	for( i=0; i<tRects.size(); i++ )
+	{
+		dbNum = i;
+
+		ComputeRect(tRects[i],dbHeight,dbWidth,dbRatio,dbCenterX,dbCenterY);
+
+		/*dbAveHigh   = dbAveHigh * (dbNum-1) /dbNum +  dbHeight * (1/dbNum);                                   
+		dbAveWidth  = dbAveWidth * (dbNum-1) /dbNum +  dbWidth  * (1/dbNum);                                   
+		dbAveRatio  = dbAveRatio  * (dbNum-1) /dbNum +  dbRatio  * (1/dbNum);                                   
+		dbAveCenterX  = dbAveCenterX  * (dbNum-1) /dbNum +  dbCenterX  * (1/dbNum);
+		dbAveCenterY  = dbAveCenterY  * (dbNum-1) /dbNum +  dbCenterY  * (1/dbNum);*/
+
+		double dbDist,dbPrevWidth,dbPrevHeight,dbPrevCenterX,dbPrevCenterY,dbPrevRatio;
+		if ( i > 1 )
+		{
+			ComputeRect(tPrevRect,dbPrevHeight,dbPrevWidth,dbPrevRatio,dbPrevCenterX,dbPrevCenterY);
+
+			dbDist = dbCenterX - dbPrevCenterX;
+
+			if ( dbDist > (dbAveWidth/2)*0.9  )
+			{
+				dbAveDist = dbAveDist  * (dbNum-1) /dbNum +  dbDist  * (1/dbNum);
+				//lujin modified at 2013.12.25,如果一个rect与上一个rect的间距大于前一个rect的5倍宽度，就把后面的rect都过滤掉了
+				/*if ( dbDist > dbAveDist * 5 )
+				{
+					break;
+				}*/
+
+			}
+
+
+		}//if ( i > 1 )
+
+		tPrevRect = tRects[i];
+
+		tRectsFiltered.push_back(tRects[i]);
+
+	}
+
+	return;
+
+}
+
+bool Process(Mat &tImage,Mat &tBwImage,Mat &tConnBwImage,RECTS &tRects)
+{
+	bool bRet;
+	int iASWF,iASWB,iASWR;
+
+	int height = tImage.rows;
+	int width  = tImage.cols;
+
+	Mat tBw = tBwImage.clone();
+	bRet = FilterSmallDot(tImage,tBw,iASWF,iASWB,iASWR);
+	
+	/********/
+	if ( !bRet )
+	{
+		return false;
+	}
+
+	RECTS tPreRects;
+
+
+	tConnBwImage = tBw;
+
+	GetRunLengthStat(tConnBwImage,iASWF,iASWB);
+
+	vector<double> tConnAreas;
+	Mat tFilledImg = tConnBwImage;
+	
+	ConnComponent(tConnBwImage,1,tPreRects,tConnAreas,true,0,tFilledImg);
+
+	int iRectHigh,iRectWidth;
+
+	sort(tPreRects.begin(),tPreRects.end(),CmpRectByXPosAscend);
+
+	RECTS tMergedRects;
+	double dbOverlapTh = 0.5;
+
+	MergeRectByOverlap(tPreRects,tMergedRects,dbOverlapTh);
+	tPreRects.clear();
+	MergeRectByOverlap(tMergedRects,tPreRects,dbOverlapTh);
+	sort(tPreRects.begin(),tPreRects.end(),CmpRectByXPosAscend);
+
+	double dbAveWidth,dbAveHigh,dbAveRatio,dbAveDist,dbAveCenterX,dbAveCenterY;
+
+	StatRect(tPreRects,tRects,dbAveWidth,dbAveHigh,dbAveRatio,dbAveDist,dbAveCenterX,dbAveCenterY);
+
+	
+	tBwImage = tConnBwImage;   //直接赋值没有真正的完成后处理
+	
+	return true;
+
+}
+
+bool NoSegmentSpacialChar(const tstring &str)
+{
+	//DEBUG("");
+	if ( str == L"一" )
+	{
+		//DEBUG("D");
+		return true;
+	}
+
+	if ( str == L"二" )
+	{
+		//DEBUG("D");
+		return true;
+	}
+
+	if ( str == L"三" )
+	{
+		//DEBUG("D");
+		return true;
+	}
+
+	if ( str == L"工" )
+	{
+		//DEBUG("D");
+		return true;
+	}
+	if ( str == L"-" )
+	{
+		//DEBUG("D");
+		return true;
+	}
+	//DEBUG("F");
+	return false;
+}
+
+void GaussSmoothArray(vector<int> &tArray,int iWin,vector<double> &tOutArray)
+{
+
+	int W = iWin/2;
+
+	Mat kernel = getGaussianKernel(iWin,1);
+
+	tOutArray.resize(tArray.size(),0);
+
+	for (int i=W; i<tArray.size()-W; i++)
+	{
+		for (int j=-W; j<=W; j++)
+		{
+			tOutArray[i] += tArray[i+j]*kernel.at<double>(j+W);
+		}
+		//tOutArray[i] /= 2*W + 1;
+	}
+
+}
+
+void Profile(const Mat &tBwImage,vector<double> &tProfile)
+{
+	int iWidth,iHeight;
+
+	iWidth = tBwImage.cols;
+	iHeight = tBwImage.rows;
+
+	int i,j;
+
+	vector<int> tTopProfile(iWidth),tBottomProfile(iWidth);
+
+	for ( i=0; i<iWidth; i++ )
+	{
+		tTopProfile[i]    = 0;
+		tBottomProfile[i] = 0;
+
+		for ( j=0; j<iHeight; j++ )
+		{
+			if ( tBwImage.at<uchar>(j,i) == 0 )
+			{
+				tTopProfile[i]++;
+			}
+			else
+			{
+				break;
+			}
+
+		}//for ( j=0; j<iHeight; j++ )
+
+		for ( j=iHeight-1; j>0; j-- )
+		{
+			if ( tBwImage.at<uchar>(j,i) == 0 )
+			{
+				tBottomProfile[i]++;
+			}
+			else
+			{
+				break;
+			}
+
+		}//for ( j=iHeight-1; j>0; j-- )
+
+		//tDiff[i] = tTopProfile[i]+tBottomProfile[i];
+
+	}//for ( i=0; i<iWidth; i++ )
+
+	vector<double> tTopProfiles(iWidth),tBottomProfiles(iWidth);
+
+	GaussSmoothArray(tTopProfile,5,tTopProfiles);
+	GaussSmoothArray(tBottomProfile,5,tBottomProfiles);
+
+	tProfile.resize(iWidth);
+
+	for ( int i=0; i<iWidth; i++ )
+	{
+		tProfile[i] = tTopProfiles[i]+tBottomProfiles[i];
+	}
+
+	return;
+
+}
+
+void ProfilePeak(const vector<double> &tArray,vector<double> &tOutArray)
+{
+	int iWidth = tArray.size();
+	tOutArray.resize(iWidth,0);
+
+	for( int i=2; i<iWidth-2; i++ )
+	{
+		if( ((tArray[i]>tArray[i-1]) && (tArray[i]>tArray[i+1])) || 
+			((tArray[i]>tArray[i-2]) && (tArray[i]>tArray[i+2])) )
+		{
+			tOutArray[i] = tArray[i];
+		}
+
+	}//for( int i=1; i<iWidth-1; i++ )
+
+	return;
+}
+
+bool SegmentByProfilePeak(Mat &tBw,RECTS &tRects)
+{
+	vector<double> tProfile,tProfilePeak,tProfiles;
+	int i;
+
+	Profile(tBw,tProfile);
+	/*	Supression(tProfile,10,tProfiles);*/
+
+	ProfilePeak(tProfile,tProfilePeak);
+
+	// 	for ( i=4; i<tProfiles.size()-4; i++ )
+	// 	{
+	// 		if ( tProfiles[i] > 0  )
+	// 		{
+	// 			if( (tProfile[i] > tProfile[i-4]) && (tProfile[i] > tProfile[i+4]) )
+	// 			{
+	// 				tProfilePeak[i] = tProfilePeak[i] + tProfiles[i];
+	// 			}
+	// 		}
+	// 		
+	// 	}
+
+	int lastp = 0;
+
+	int offset = 5;
+
+	int iWidth = tProfilePeak.size();
+	int iHeight = tBw.rows;
+
+	double dbThred = 0;
+
+	SHAPE_RECT tRect;
+
+	for( i=0; i<iWidth; i++ )
+	{
+		if( i >= (iWidth-offset))
+		{
+			tRect.tTopLeft.x = lastp;
+			tRect.tTopLeft.y = 0;
+			tRect.tButtomRight.x = iWidth-1;
+			tRect.tButtomRight.y = iHeight-1;
+			tRects.push_back(tRect);
+			break;
+
+		}//if( i >= (iWidth-offset))
+
+		if( tProfilePeak[i] > dbThred )
+		{
+
+			if( (i-lastp) >offset )
+			{
+				if ((tProfile[i]>tProfile[i-1]) || (tProfile[i]>tProfile[i+1]))
+				{
+					tRect.tTopLeft.x = lastp;
+					tRect.tTopLeft.y = 0;
+					tRect.tButtomRight.x = i;
+					tRect.tButtomRight.y = iHeight-1;
+					tRects.push_back(tRect);
+
+					lastp = i+1;
+
+				}
+
+
+			}//if( (i-lastp) >offset )
+
+		}//if( tProfiles[i] > iThred )
+
+	}//for( i=0; i<iWidth; i++ )
+
+	return true;
+}
+
+bool SegmentByProfile(Mat &tBw,RECTS &tRects)
+{
+	return SegmentByProfilePeak(tBw,tRects);
+}
+
+void MergeOverlap(long handle, int iType,MyOcrEngine p, Mat &tBw,const RECTS &tRects,double dbRatioTh,RECTS &tMergedRects)
+{
+	stLineSegmentationParam m_tLineSegmentationParam;
+	//initialSegmentationParam(m_tLineSegmentationParam);
+	RECTS tRectsTmp;
+	tRectsTmp = tRects;
+
+	double xs,ys,xe,ye;
+	int i,iNumBox;
+
+	double xs1,ys1,xe1,ye1,xsm,ysm,xem,yem;
+	double height1,width1,Ratio1,square1;
+	double height2,width2,Ratio2,square2;
+	double Uheight,Uwidth,Uratio;
+	double Oheight,Owidth,Osquare;
+
+	bool bVerticalOverlaped;
+	bool bAreaOverlaped;
+	bool bTooDiv;
+
+	int j;
+	int merged;
+
+	Mat tImg1,tImg2,tImg3;
+
+	double dbMinLow = 100000,dbMaxHight = 0;
+	iNumBox = tRectsTmp.size();
+
+	int bShow = 0;
+
+	for( i=0; i<iNumBox; i++ )
+	{
+
+		xs = tRectsTmp[i].tTopLeft.x;
+		ys = tRectsTmp[i].tTopLeft.y;
+		xe = tRectsTmp[i].tButtomRight.x;
+		ye = tRectsTmp[i].tButtomRight.y;   
+
+		if ( (ys < dbMinLow) &&(ys > 0)  )
+		{
+			dbMinLow = ys;
+		}
+		if ( ye > dbMaxHight  )
+		{
+			dbMaxHight = ye;
+		}
+
+		if( (xs == 0) && (ys == 0) && (xe == 0) && (ye == 0) )
+		{
+			continue;
+		}
+
+		//for( j=i+1; (j<i+2)&&(j<iNumBox); j++ )  //实际上应该只和周围的box合并
+		for( j=i+1; j<iNumBox; j++ )  //实际上应该只和周围的box合并
+		{
+
+			xs = tRectsTmp[i].tTopLeft.x;
+			ys = tRectsTmp[i].tTopLeft.y;
+			xe = tRectsTmp[i].tButtomRight.x;
+			ye = tRectsTmp[i].tButtomRight.y;   
+
+			xs1 = tRectsTmp[j].tTopLeft.x;
+			ys1 = tRectsTmp[j].tTopLeft.y;
+			xe1 = tRectsTmp[j].tButtomRight.x;
+			ye1 = tRectsTmp[j].tButtomRight.y;         
+
+			if( (xs1 == 0) && (ys1 == 0) && (xe1 == 0) && (ye1 == 0) )
+			{
+				continue;
+			}
+
+			xsm = MIN(xs,xs1);
+			xem = MAX(xe,xe1);
+			ysm = MIN(ys,ys1);
+			yem = MAX(ye,ye1);   
+
+			// 			tImg1 = tBw(Range(ys,ye), Range(xs,xe));
+			// 			tImg2 = tBw(Range(ys1,ye1), Range(xs1,xe1));
+			// 			tImg3 = tBw(Range(ysm,yem), Range(xsm,xem));
+
+			height1 = ye-ys+1;
+			width1 = xe-xs+1;
+			Ratio1 = width1 / height1;
+			square1 = width1*height1;
+
+			height2 = ye1-ys1+1;
+			width2 = xe1-xs1+1;
+			Ratio2 = width2 / height2;
+			square2 = width2*height2;
+
+			Uwidth = MAX(xe,xe1)-MIN(xs,xs1)+1;
+			Uheight = MAX(ye,ye1)-MIN(ys,ys1)+1;
+
+			Uratio = Uwidth / Uheight;
+
+			Owidth = width1 + width2 - Uwidth ;
+			Oheight = height1 + height2 - Uheight;
+
+			Osquare = Owidth * Oheight;
+
+			merged = 0;
+
+			//bTooDiv = ((abs(width2-width1)/MAX(width1,width2)) > 0.6);
+			bTooDiv = false;  /////wwf修改
+			bVerticalOverlaped = ( (xs1 >= xs) && (xs1 <xe) || (xe1 > xs) && (xe1 <=xe) ) ;
+			bAreaOverlaped    = ((Owidth > 0)&&(Oheight > 0));
+			//bAreaOverlaped    = (Osquare > 0.8*MIN(square1,square2)) ||((Owidth > 0)&&(Oheight > 0));
+
+			if (  (bAreaOverlaped || (bVerticalOverlaped && (!bTooDiv)) ) && 
+				( (Uwidth<m_tLineSegmentationParam.lMaxWidth)&&(Uheight<m_tLineSegmentationParam.lMaxHigh) ) ) 
+			{
+				merged = 1;
+
+			}// if (  bAreaOverlaped || verticaloverlaped ) 
+
+			if( 1 == merged )
+			{
+				// 				if ( bShow == 1 )
+				// 				{
+				// 					ShowMat(tImg1,"1",true);
+				// 					ShowMat(tImg2,"2",true);
+				// 					ShowMat(tImg3,"3",true);
+				// 				}
+
+				tRectsTmp[i].tTopLeft.x     = xsm;
+				tRectsTmp[i].tTopLeft.y     = ysm;
+				tRectsTmp[i].tButtomRight.x = xem;
+				tRectsTmp[i].tButtomRight.y = yem;   
+
+				tRectsTmp[j].tTopLeft.x     = 0;
+				tRectsTmp[j].tTopLeft.y     = 0;
+				tRectsTmp[j].tButtomRight.x = 0;
+				tRectsTmp[j].tButtomRight.y = 0;   
+
+			}//if( 1 == merged )
+			else
+			{
+				if ( bVerticalOverlaped && bTooDiv )
+				{
+					if ( width1 < width2 )
+					{
+						tRectsTmp[i].tTopLeft.x     = 0;
+						tRectsTmp[i].tTopLeft.y     = 0;
+						tRectsTmp[i].tButtomRight.x = 0;
+						tRectsTmp[i].tButtomRight.y = 0;   
+					}
+					else
+					{
+						tRectsTmp[j].tTopLeft.x     = 0;
+						tRectsTmp[j].tTopLeft.y     = 0;
+						tRectsTmp[j].tButtomRight.x = 0;
+						tRectsTmp[j].tButtomRight.y = 0;   
+					}
+				}//if ( bVerticalOverlaped && bTooDiv )
+
+			}
+
+
+		}//end% for j=i+1:numbox
+	}//end % for i=1:numbox
+
+	double dbRatio;
+	bool bRet;
+	RECTS tSubRects;
+	int iNum;
+	SHAPE_RECT tRect;
+
+	tstring str;
+	long dmin[10];
+	double dbRank;
+	double dbConfidence;
+
+	for( i=0; i<iNumBox; i++ )
+	{
+
+		xs = tRectsTmp[i].tTopLeft.x;
+		ys = tRectsTmp[i].tTopLeft.y;
+		xe = tRectsTmp[i].tButtomRight.x;
+		ye = tRectsTmp[i].tButtomRight.y;   
+
+		if( (xs == 0) && (ys == 0) && (xe == 0) && (ye == 0) )
+		{
+			continue;
+		}
+
+		//{
+		//	Mat tDebuShow = tBw(Range(ys,ye+1),Range(xs,xe+1));
+		//	bool bRet = OCREngine_Char(handle, iType, tDebuShow, str, dmin);
+		//	
+		//	destroyAllWindows();
+		//	imshow("tmp", tDebuShow);
+
+		//	waitKey();
+		//	str.clear();
+		//}
+
+
+		dbRatio = (xe-xs+1)/(ye-ys+1);
+		if( (dbRatio > dbRatioTh) && ((ye-ys+1)>5) )
+		{
+			Mat tBwchars = tBw(Range(ys,ye+1),Range(xs,xe+1));
+
+			/*			ShowMat(tBwchars,"3",true);*/
+
+			/*dbRank = m_pOCR->SearchChar(tBwchars,str,dmin);*/
+			//OCREngine_Char(handle, iType, tBwchars,str,dmin);
+			(*p)(handle, iType, tBwchars,str,dmin);
+			dbRank = dmin[0];
+			//dbConfidence = GetConfidence(m_tLineSegmentationParam.lMaxDist,m_tLineSegmentationParam.lDistRatio,dmin);
+			dbConfidence = (double)dmin[0]/10000;
+
+			str = str.substr(0,1);
+
+			bRet = NoSegmentSpacialChar(str);
+			//if ( (!bRet) || ((dbConfidence < 1)&&(dbRatio>2.4)) ) //有时候大串字符会被识别成“一”
+			if ( (!bRet) || ((dbConfidence < 0.5)&&(dbRatio>2.4)) ) //有时候大串字符会被识别成“一”
+			{
+				tSubRects.clear();
+				bRet = SegmentByProfile(tBwchars,tSubRects);
+				if ( bRet )
+				{
+					iNum = tSubRects.size();
+
+					for( int j=0; j<iNum; j++) 
+					{
+						tRect.tTopLeft.x     = tSubRects[j].tTopLeft.x + xs;
+						//tRect.tTopLeft.y     = dbMinLow;
+						tRect.tTopLeft.y     = ys;
+						tRect.tButtomRight.x = tSubRects[j].tButtomRight.x + xs;
+						//tRect.tButtomRight.y = dbMaxHight;
+						tRect.tButtomRight.y = ye;
+						tMergedRects.push_back(tRect);
+
+					}//for( int j=0; j<iNum; j++) 
+
+					continue;
+
+				}//if ( bRet )
+
+			}//if ( !bRet )
+
+		}//if( (dbRatio > dbRatioTh) && ((ye-ys+1)>5) )
+
+		tRect.tTopLeft.x     = xs;
+		//tRect.tTopLeft.y     = dbMinLow;
+		tRect.tTopLeft.y     = ys;
+		tRect.tButtomRight.x = xe;
+		//tRect.tButtomRight.y = dbMaxHight;
+		tRect.tButtomRight.y = ye;
+		tMergedRects.push_back(tRect);
+
+	}//for( i=0; i<iNumBox; i++ )
+
+	return;
+}
+
+bool IsNumChar(const tstring &strChar)
+{
+	//DEBUG("");
+	tstring strFirstChar;
+
+	if ( strChar.length() == 0 )
+	{
+		//DEBUG("F");
+		return false;
+	}
+
+	strFirstChar = strChar.substr(0,1);
+
+	bool bFund = false;
+	int idx;
+	tstring strNum = L"0123456789";
+
+	idx = strNum.find_first_of(strFirstChar);
+	if ( idx != tstring::npos )
+	{
+		bFund = true;
+	}
+	//DEBUG("D");
+	return bFund;
+
+}
+
+/////
+bool IsEnglishChar(const tstring &strChar)
+{
+	//DEBUG("");
+	tstring strFirstChar;
+
+	if ( strChar.length() == 0 )
+	{
+		//DEBUG("F");
+		return false;
+	}
+
+	strFirstChar = strChar.substr(0,1);
+
+	bool bFund = false;
+	int idx;
+	tstring strNum = L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+	idx = strNum.find_first_of(strFirstChar);
+	if ( idx != tstring::npos )
+	{
+		bFund = true;
+	}
+	//DEBUG("D");
+	return bFund;
+
+}
+
+/////
+bool IsPunctuationChar(const tstring &strChar)
+{
+	//DEBUG("");
+	tstring strFirstChar;
+
+	if ( strChar.length() == 0 )
+	{
+		//DEBUG("D");
+		return false;
+	}
+
+	strFirstChar = strChar.substr(0,1);
+
+	bool bFund = false;
+	int idx;
+	tstring strNum = L"{}[]:(),.';\"?!（）；。‘’“”：？！《》】【--";
+
+	idx = strNum.find_first_of(strFirstChar);
+	if ( idx != tstring::npos )
+	{
+		bFund = true;
+	}
+	//DEBUG("D");
+	return bFund;
+}
+
+/////
+bool IsBracketChar(const tstring &strChar)
+{
+	//DEBUG("");
+	tstring strFirstChar;
+
+	if ( strChar.length() == 0 )
+	{
+		//DEBUG("D");
+		return false;
+	}
+
+	strFirstChar = strChar.substr(0,1);
+
+	bool bFund = false;
+	int idx;
+	tstring strNum = L"()（）";
+
+	idx = strNum.find_first_of(strFirstChar);
+	if ( idx != tstring::npos )
+	{
+		bFund = true;
+	}
+	//DEBUG("D");
+	return bFund;
+}
+
+bool IsChineseChar(const tstring &strChar)
+{
+	//DEBUG("");
+	if ( strChar == L"" )
+	{
+		//DEBUG("F");
+		return false;
+	}
+
+	if ( IsNumChar(strChar) )
+	{
+		//DEBUG("F");
+		return false;
+	}
+	if ( IsEnglishChar(strChar) )
+	{
+		//DEBUG("F");
+		return false;
+	}
+	if ( IsPunctuationChar(strChar) )
+	{
+		//DEBUG("F");
+		return false;
+	}
+	for(int i=0;i<strChar.size();i++)
+	{
+		///限制汉字的编码范围
+		if(strChar[i]>49000||strChar[i]<9000)
+		{
+			return false;
+		}
+
+	}
+
+	//DEBUG("D");
+	return true;
+}
+
+void WeightedGraph(long handle, int iType,MyOcrEngine p, Mat &tImage,Mat &tBw,const RECTS &tRects,double dbRatioTh,Mat &G,Mat &W,Mat &CM,Mat &Labels,Mat &DMIN)
+{
+	stLineSegmentationParam m_tLineSegmentationParam;
+	//initialSegmentationParam(m_tLineSegmentationParam);
+	int iNum = tRects.size();
+
+	G = Mat::zeros(iNum+1,iNum+1, CV_32SC1);
+	W = Mat::zeros(iNum+1,iNum+1, CV_64FC1);
+	CM = Mat::zeros(iNum+1,iNum+1, CV_32SC1);
+	Labels = Mat::zeros(iNum+1,iNum+1, CV_32SC1);
+	DMIN   = Mat::zeros(iNum+1,iNum+1, CV_32SC1);
+
+	int height = tBw.rows;
+	int width  = tBw.cols;
+	double xs,ys,xe,ye,xs1,ys1,xe1,ye1,xsm,xem,ysm,yem;
+	double ratio;
+	long dmin[10],dming[10];
+	double dbRank;
+	tstring str,strg,*pStr;
+	long *pDim;
+
+	double dbConfidence = 0;
+	Mat tBwChar,tImgChar;
+
+	Mat tImg1,tImg2,tImg3;
+
+	int iDebugShow = 0;
+
+	for(int i=0; i<iNum; i++) 
+	{
+		for(int j=i+1; j<(iNum+1);j++)
+		{
+			xs = tRects[i].tTopLeft.x ;
+			ys = tRects[i].tTopLeft.y;
+			xe = tRects[i].tButtomRight.x;
+			ye = tRects[i].tButtomRight.y;   
+
+			xs1 = tRects[j-1].tTopLeft.x ;
+			ys1 = tRects[j-1].tTopLeft.y;
+			xe1 = tRects[j-1].tButtomRight.x;
+			ye1 = tRects[j-1].tButtomRight.y;   
+
+			xsm = MIN(xs,xs1);
+			xem = MAX(xe,xe1);
+			ysm = MIN(ys,ys1);
+			yem = MAX(ye,ye1);   
+
+			ratio = (xem-xsm+1)/(yem-ysm+1);
+
+			if( ( (ratio < dbRatioTh ) &&
+				((yem-ysm)<m_tLineSegmentationParam.lMaxHigh) &&
+				((xem-xsm)<m_tLineSegmentationParam.lMaxWidth) )||(i == (j-1)) )
+			{
+
+				G.at<int>(i,j) = 1;
+
+				xs = xsm;
+				xe = xem;
+				ys = ysm;
+				ye = yem;
+				if ((xe <= xs) || (ye <= ys) )
+				{
+					continue;
+				}
+
+				tBwChar = tBw(Range(ys,ye+1),Range(xs,xe+1));
+
+				(*p)(handle, iType, tBwChar,str,dmin);
+				dbRank = dmin[0];
+
+				dbConfidence = (double)dmin[0]/10000;
+				for (int m = 0; m<10;++m)
+				{
+					dmin[m] = 10000-dmin[m];
+				}
+
+				if ( dbConfidence < 0.5 )
+				{
+					CM.at<int>(i,j) = 0;
+					//str = _T("");
+					W.at<double>(i,j) = dmin[0]*(j-i);
+				}
+				else
+				{
+					CM.at<int>(i,j) = 1;
+
+					if( (i == (j-1) ) && (ratio < 0.7)&& IsChineseChar(str) )
+					{
+						W.at<double>(i,j) = dmin[0]*(j-i)*1.2;
+					}
+					else
+					{
+						//W.at<double>(i,j) = dmin[0]*(j-i)*0.8;
+						W.at<double>(i,j) = dmin[0]*(j-i);
+					}
+				}
+
+				pStr = new tstring;
+				*pStr = str;
+				Labels.at<int>(i,j) = (long)pStr;
+
+				pDim = new long[10];
+				memcpy(pDim,dmin,10*sizeof(long));
+				DMIN.at<int>(i,j) = (long)pDim;
+
+			}//if( ratio < ratioth )||(i == (j-1))
+
+		}//%for j=i+1:num
+
+	}//%for i=1:num
+
+	double w,sum,maxw;
+
+	for(int i=0; i<iNum; i++) 
+	{
+		for(int j=i+1; j<(iNum+1); j++ )
+		{
+			if( (G.at<int>(i,j) == 1) && ((j-i) > 1) )
+			{
+				w = W.at<double>(i,j) / (j-i) ;
+
+				sum = 0;
+				maxw = 0;
+
+				for(int k=i; k<j; k++) 
+				{
+					sum = sum + W.at<double>(k,k+1);
+					if( maxw < W.at<double>(k,k+1))
+					{
+						maxw = W.at<double>(k,k+1);
+					}
+
+				}//for k=i:j-1
+
+				if( w < maxw )
+				{
+					//%W(i,j) = sum -1;
+					W.at<double>(i,j) = w;
+				}
+
+			}
+
+		}// %for j=i+1:num
+	}//%for i=1:num
+}
+
+void ShortestPath(Mat &G,Mat &W,Mat &CM,vector<int> &tPhi)
+{
+	int iNum;
+	iNum = G.rows;
+
+	double inf = 10000000;
+
+	vector<double> d(iNum);
+	vector<int> phi(iNum);
+
+	for ( int i=0; i<iNum; i++)
+	{
+		d[i] = inf;
+		phi[i] = -1;
+	}
+
+	d[0] = 0;
+	for(int u=0; u<(iNum-1); u++ )
+	{
+		for(int v=u+1; v<iNum; v++) 
+		{
+			if( G.at<int>(u,v) == 1)
+			{
+				if( d[v] > (d[u] + W.at<double>(u,v)) )
+				{
+					d[v]   = d[u] + W.at<double>(u,v);
+					phi[v] = u;
+				}
+
+			}//if( G.at<int>(u,v) == 1)
+
+		}//for j=i+1:num
+	}//%for i=1:num-1
+
+	tPhi = phi;
+}
+
+//判断某个Rect是否是标点（根据经验，标点在文字下方，或者在文字中间("-"),标点高度为字符高度的1/2.5）
+bool IsRectPunc(const Mat tBw,int starty,int endy,RECTS tMergedRects,int index)
+{
+	Rect rc = Rect(tMergedRects[index].tTopLeft.x,tMergedRects[index].tTopLeft.y, tMergedRects[index].tButtomRight.x - tMergedRects[index].tTopLeft.x, tMergedRects[index].tButtomRight.y - tMergedRects[index].tTopLeft.y);
+	Mat tmp = tBw(rc).clone();
+	int charHeight = 0;
+	int nTop = tmp.rows - 1;
+	int nBot = 0;
+	for (int i = 0; i < tmp.rows; i++)
+	{
+		for (int j = 0; j < tmp.cols; j++)
+		{
+			if (tmp.at<uchar>(i,j))
+			{
+				nTop = min(i,nTop);
+				nBot = max(i, nBot);
+			}
+		}
+	}
+	if (nBot < nTop)
+	{
+		charHeight = 0;
+	}
+	else
+	{
+		charHeight = nBot - nTop + 1;
+	}
+
+	int RegionHeight = endy - starty;
+	if(RegionHeight/2>charHeight)
+	{
+		if(index == 0)//满足高度小于相邻两个Rect高度的1/2.5，则可认为这是给标点
+		{
+			if(index+1>=tMergedRects.size())
+				return false;
+			int startHeight = tMergedRects[index+1].tButtomRight.y - tMergedRects[index+1].tTopLeft.y;
+			if(startHeight/2.5 > charHeight)
+				return true;
+		}
+		else if(index == tMergedRects.size()-1)
+		{
+			int endHeight = tMergedRects[index-1].tButtomRight.y - tMergedRects[index-1].tTopLeft.y;
+			if((endHeight/2.5 > charHeight) && (tMergedRects[index].tButtomRight.y > (starty + endy)/2))
+				return true;
+		}
+		else
+		{
+			int startHeight = tMergedRects[index+1].tButtomRight.y - tMergedRects[index+1].tTopLeft.y;
+			int endHeight = tMergedRects[index-1].tButtomRight.y - tMergedRects[index-1].tTopLeft.y;
+			if ((startHeight*0.6 >= charHeight && endHeight*0.6 >= charHeight)
+				|| rc.y + nTop > tMergedRects[index+1].tButtomRight.y + startHeight * 0.4
+				|| rc.y + nTop > tMergedRects[index+1].tButtomRight.y + endHeight * 0.4)
+				return true;
+		}
+	}
+	return false; 
+}
+
+
+void SegmentLine(long handle, int iType, MyOcrEngine p,Mat &tImage,Mat &tBw,RECTS &tRects,stOcrRectList &tOcrRectList)
+{
+	stLineSegmentationParam m_tLineSegmentationParam;
+	//initialSegmentationParam(m_tLineSegmentationParam);
+	double dbRatioTh = m_tLineSegmentationParam.dbRatioTh;   //控制切分是否合并或分离的阈值
+	if(iType==1||iType==3)
+	{
+		dbRatioTh =1.15;
+	}
+	RECTS tMergedRects;
+	vector<int> tPhi;
+
+	Mat G,W,CM,Labels,DMIN;
+
+	Mat tBwTmp;
+
+	//imshow("二值化",tBw);
+	//waitKey();
+
+	sort(tRects.begin(),tRects.end(),CmpRectByXPosAscend);
+
+
+	MergeOverlap(handle, iType, p, tBw, tRects, dbRatioTh, tMergedRects);
+	m_tLineSegmentationParam.bDebug=true;
+
+	sort(tMergedRects.begin(),tMergedRects.end(),CmpRectByXPosAscend);
+
+	/***************************************************************************************************/
+	//判断某个Rect是否是标点符号			--兴业财务报表数字金额识别
+	int starty = 0;
+	int endy = tBw.rows-1;
+	Mat tReduce_x;
+	reduce(tBw,tReduce_x,1,CV_REDUCE_SUM,CV_32FC1);
+	for(int i = 0; i < tReduce_x.rows; i++)
+	{
+		if (abs(tReduce_x.at<float>(i,0)) <= 1)
+			continue;
+		else
+		{
+			starty = i;
+			break;
+		}
+	}
+
+	for(int i = tReduce_x.rows - 1; i >= 0; i--)
+	{
+		if (abs(tReduce_x.at<float>(i,0)) <= 1)
+			continue;
+		else
+		{
+			endy = i;
+			break;
+		}
+	}
+
+	Mat tBwCopy = tBw.clone();
+	stOcrRectList tOcrRectList_tmp;
+	RECTS tMergedRects_new;
+	for(int i = 0; i < tMergedRects.size(); i++)
+	{
+		bool flag = IsRectPunc(tBw,starty,endy,tMergedRects,i);
+		if(flag)
+		{
+			int charHeight = tMergedRects[i].tButtomRight.y-tMergedRects[i].tTopLeft.y;
+			int charWidth = tMergedRects[i].tButtomRight.x-tMergedRects[i].tTopLeft.x;
+			int x1 = tMergedRects[i].tTopLeft.x-charWidth*0.2 >= 0 ? tMergedRects[i].tTopLeft.x-charWidth*0.2 : 0;
+			int y1 = tMergedRects[i].tTopLeft.y-charHeight*0.2 >= 0 ? tMergedRects[i].tTopLeft.y-charHeight*0.2 : 0;
+			int x2 = tMergedRects[i].tButtomRight.x+charWidth*0.2 < tBw.cols ? tMergedRects[i].tButtomRight.x+charWidth*0.2 : tBw.cols - 2;
+			int y2 = tMergedRects[i].tButtomRight.y+charHeight*0.2 < tBw.rows ? tMergedRects[i].tButtomRight.y+charHeight*0.2 : tBw.rows - 2;
+			Rect tmpRect = Rect(Point(x1,y1),Point(x2,y2));
+			rectangle(tBwCopy,tmpRect,Scalar(0),-1);
+			stOcrRect tOcrRect_tmp;
+			tOcrRect_tmp.tRect = tMergedRects[i];
+			tOcrRect_tmp.strOcrResult = _T("");
+			tOcrRectList_tmp.push_back(tOcrRect_tmp);
+		}
+		else
+			tMergedRects_new.push_back(tMergedRects[i]);
+	}
+
+	/***************************************************************************************************/
+
+	WeightedGraph(handle, iType,p,tBwCopy,tBwCopy,tMergedRects_new,dbRatioTh,G,W,CM,Labels,DMIN);
+
+	ShortestPath(G,W,CM,tPhi);
+
+	int u,v;
+
+	int iNum = tPhi.size();
+	double xs,ys,xe,ye,xs1,ys1,xe1,ye1,xsm,ysm,xem,yem;
+	stOcrRect tOcrRect;
+	tstring * pStr = NULL;
+	long * pDmin   = NULL;
+
+	v = iNum-1;
+	/***修改于2013-8-7防止进入死循环****/
+	int flag=0;
+	for (int i=0;i<iNum;i++)
+	{
+		if (tPhi[i]!=-1)   //如果全为-1则return
+		{
+			flag=1;
+			break;
+		}
+	}
+	if (flag==0)
+	{
+		return;
+	}
+
+	/**********/
+	while ( v!=0 )
+	{
+		u = tPhi[v];
+		if ( u == -1 )
+		{
+			v = v - 1; // 防止进入死循环
+			continue;
+		}
+
+		xs = tMergedRects_new[u].tTopLeft.x;
+		ys = tMergedRects_new[u].tTopLeft.y;
+		xe = tMergedRects_new[u].tButtomRight.x;
+		ye = tMergedRects_new[u].tButtomRight.y;
+
+		xs1 = tMergedRects_new[v-1].tTopLeft.x;
+		ys1 = tMergedRects_new[v-1].tTopLeft.y;
+		xe1 = tMergedRects_new[v-1].tButtomRight.x;
+		ye1 = tMergedRects_new[v-1].tButtomRight.y;
+
+		xsm = MIN(xs, xs1);
+		xem = MAX(xe, xe1);
+		ysm = MIN(ys, ys1);
+		yem = MAX(ye, ye1);  
+
+		tOcrRect.tRect.tTopLeft.x = xsm;
+		tOcrRect.tRect.tTopLeft.y = ysm;
+		tOcrRect.tRect.tButtomRight.x = xem;
+		tOcrRect.tRect.tButtomRight.y = yem;
+
+		tOcrRect.lDist = (long)W.at<double>(u,v);
+		tOcrRect.dbConfidence = CM.at<int>(u,v);
+
+		pStr = (tstring *)Labels.at<int>(u,v);
+
+		if ( NULL == pStr)
+		{
+			tOcrRect.strOcrResult = _T("");
+		}
+		else
+		{
+			tOcrRect.strOcrResult = *(pStr);
+		}
+
+
+		pDmin = (long *)DMIN.at<int>(u,v);
+		if ( NULL == pDmin )
+		{
+			memset(tOcrRect.lDmin,110000,10*sizeof(long) );
+		}
+		else
+		{
+			memcpy(tOcrRect.lDmin,pDmin,10*sizeof(long) );
+		}
+
+
+		tOcrRectList.push_back(tOcrRect);
+
+		v = u;
+
+	}//while ( v!=0 )
+
+	sort(tOcrRectList.begin(),tOcrRectList.end(),CmpOcrRectListByXPosAscend);
+
+	/**************/
+
+	long *pDim;
+	pStr = NULL;
+
+	for ( u=0; u<Labels.rows; u++)
+	{
+		for ( v=0; v<Labels.cols; v++)
+		{
+			pStr = (tstring *)Labels.at<int>(u,v);
+			if ( NULL != pStr )
+			{
+				delete pStr;
+				Labels.at<int>(u,v) = 0;
+			} 
+			pDim = (long *)DMIN.at<int>(u,v);
+			if ( NULL != pDim )
+			{
+				delete [] pDim;
+				DMIN.at<int>(u,v) = 0;
+			}
+		}
+	}
+
+	/*******************************************************/
+	for(int i = 0; i < tOcrRectList_tmp.size(); i++)
+		tOcrRectList.push_back(tOcrRectList_tmp[i]);
+
+	sort(tOcrRectList.begin(),tOcrRectList.end(),CmpOcrRectListByXPosAscend);
+	/*******************************************************/
+}
+
+bool SegAndReg(long hHandle, int iType, MyOcrEngine p, const Mat &tImage, const Mat &tBwChar, LineOcrResult &regResult)
+{
+	//stLineSegmentationParam m_tLineSegmentationParam;
+	stOcrRectList tOcrRectList;
+	//initialSegmentationParam(m_tLineSegmentationParam);
+	Mat tImage_copy = tImage.clone();
+	Mat tBwChar_copy = tBwChar.clone();
+	Mat tconnMat;
+	RECTS tRects;
+
+	if(!Process(tImage_copy,tBwChar_copy,tconnMat,tRects))
+		return false;
+
+	SegmentLine(hHandle, iType, p,tImage_copy,tBwChar_copy,tRects,tOcrRectList);
+
+	if(tOcrRectList.empty())
+		return false;
+	for (int i =0;i<tOcrRectList.size();++i)
+	{
+		OcrRectResult temp;
+		temp.imgRect = tOcrRectList[i].tRect;
+		temp.strResult = tOcrRectList[i].strOcrResult;
+		for (int j = 0; j<10;++j)
+		{
+			if(j<tOcrRectList[i].strOcrResult.size())
+			{
+				double dmin =1-(double)tOcrRectList[i].lDmin[j]/10000;
+				temp.dbConfi.push_back(dmin);
+
+			}
+			else
+				temp.dbConfi.push_back(0.0);			
+		}
+		regResult.vecOcrRectResult.push_back(temp);
+	}
+
+	return true;
+}
+
+
+bool remove_Amount_space(OcrRectResult data)
+{
+	return data.strResult == L"";
+}
+
+bool remove_Amount_unvalid(OcrRectResult data)
+{
+	return data.imgRect.tButtomRight.y == -1;
+}
+
+// 数据识别后处理功能模块。修改原有的处理方案。wspeng，20160729
+// 数据识别包含两个步骤：1、判断是否存在标点符号‘，’‘.’；2、对可能存在标点的位置进行识别判断，主要为第一位和其他候选位；
+// 如果标点的个数多于1个，则将排在前面的置为空，仅保留最后一个；同时如果最后一个的位置小雨字符个数-4，同样置为空，说明正确的小数点因为过小被剔除，人工添加；
+// 实际测试时发现的数据有以下几种：1、（-）4321；2、（-）32.11；3、（-）322.1；4、（-）3.321.
+// 消除了双字符粘连识别错误问题。
+int ProcessAmount(long tHandles,const Mat& tsrcImg,const Mat& tBwImg,LineOcrResult& strResult)
+{
+	/// 异常判断
+	if (strResult.vecOcrRectResult.size() == 0 || tsrcImg.empty() || tBwImg.empty())
+		return -1;
+
+	long npntrHandle = tHandles;	//NPNTR引擎
+
+	int nRefWidth = 0;
+	int nRefHeight = 0;
+	int nCnt = 0;
+	float fRefBot = 0;
+	float fRefTop = 0;
+	bool  bNeg = false;		// 负号存在与否的标记
+	bool  bPlu = false;		// 标点存在与否的标记
+
+
+	// 判断是否可能存在负号
+	if (strResult.vecOcrRectResult[0].strResult == L"")
+	{
+		bNeg = true;
+	}
+
+	// 计算字符的参考高度和参考宽度
+	for (int i = 1; i < strResult.vecOcrRectResult.size(); i++)
+	{
+		if (strResult.vecOcrRectResult[i].strResult != L"")
+		{
+			int nTmpWidth = strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - strResult.vecOcrRectResult[i].imgRect.tTopLeft.x + 1;
+			int nTmpHeight = strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y + 1;
+			if (nTmpWidth <= nTmpHeight)
+			{
+				nRefWidth += nTmpWidth;
+				nRefHeight += nTmpHeight;
+				fRefBot += strResult.vecOcrRectResult[i].imgRect.tButtomRight.y;
+				fRefTop += strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+				nCnt++;
+			}
+		}
+	}
+
+	if (nCnt)
+	{
+		fRefBot /= nCnt;
+		fRefTop /= nCnt;
+
+		for (int m = 0; m < strResult.vecOcrRectResult.size(); m++)
+		{
+			if (strResult.vecOcrRectResult[m].imgRect.tTopLeft.y > fRefBot || strResult.vecOcrRectResult[m].imgRect.tButtomRight.y < fRefTop)
+			{
+				strResult.vecOcrRectResult[m].imgRect.tButtomRight.y = -1;
+			}
+		}
+	}
+
+	strResult.vecOcrRectResult.erase(remove_if(strResult.vecOcrRectResult.begin(), strResult.vecOcrRectResult.end(), remove_Amount_unvalid), strResult.vecOcrRectResult.end());
+
+	if (strResult.vecOcrRectResult.size() <= 0)
+	{
+		return -1;
+	}
+
+	// 对于负数，如-4，很容易导致粘连。需要根据字符的宽高比进行粘连判断。
+	if (!bNeg && nCnt >= 3)
+	{
+		float fRatio = nRefWidth * 1.0 / nRefHeight;
+		float fOneRatio = (strResult.vecOcrRectResult[0].imgRect.tButtomRight.x - strResult.vecOcrRectResult[0].imgRect.tTopLeft.x) * 1.0 / ( strResult.vecOcrRectResult[0].imgRect.tButtomRight.y - strResult.vecOcrRectResult[0].imgRect.tTopLeft.y);
+
+		// 是否存在粘连的判别准则是宽高比异于其他的宽高比
+		if (fOneRatio > fRatio * 1.4 && (strResult.vecOcrRectResult[0].imgRect.tButtomRight.x - strResult.vecOcrRectResult[0].imgRect.tTopLeft.x) > nRefWidth * 1.3 / nCnt)
+		{
+			Rect rightRect = Rect();
+			rightRect.width = nRefWidth * 1.0 / nCnt + 0.5;
+			rightRect.height = strResult.vecOcrRectResult[0].imgRect.tButtomRight.y - strResult.vecOcrRectResult[0].imgRect.tTopLeft.y + 1;
+			rightRect.y = strResult.vecOcrRectResult[0].imgRect.tTopLeft.y;
+			rightRect.x = strResult.vecOcrRectResult[0].imgRect.tButtomRight.x - rightRect.width;
+
+			Rect leftRect = Rect();
+			leftRect.y = rightRect.y;
+			leftRect.height = rightRect.height;
+			leftRect.x = strResult.vecOcrRectResult[0].imgRect.tTopLeft.x;
+			leftRect.width = rightRect.x - leftRect.x - 1;
+
+			//  right
+			Mat charMat = tBwImg(rightRect);
+			tstring tstrRes;
+			long dmin[10];
+			if (charMat.empty())
+			{
+				return -1;
+			}
+			OCREngine_Char(npntrHandle,1,charMat,tstrRes,dmin);
+
+			// 当且仅当切分后字符的置信度较高时才有意义，否则没必要切分。
+			if (dmin[0] > strResult.vecOcrRectResult[0].dbConfi[0] * 8000)
+			{
+				strResult.vecOcrRectResult[0].strResult = tstrRes;
+				strResult.vecOcrRectResult[0].dbConfi[0] = dmin[0]/10000.0;
+				strResult.vecOcrRectResult[0].imgRect.tTopLeft.x = rightRect.x;
+
+				charMat = tBwImg(leftRect);
+				if (charMat.empty())
+				{
+					return -1;
+				}
+				OCREngine_Char(npntrHandle,0,charMat,tstrRes,dmin);
+
+				int score = 0;
+				if (tstrRes == L"0" || tstrRes == L"1" || tstrRes == L"2" || tstrRes == L"3" || tstrRes == L"4"
+					|| tstrRes == L"5" || tstrRes == L"6" || tstrRes == L"7" || tstrRes == L"8" || tstrRes == L"9"
+					|| tstrRes == L"l" || tstrRes == L"B" || tstrRes == L"O")
+				{
+					score = 1;
+				}
+
+				// left
+				vector<OcrRectResult>::iterator it = strResult.vecOcrRectResult.begin();
+				OcrRectResult tmpResult;
+				tmpResult.imgRect.tTopLeft.x = leftRect.x;
+				tmpResult.imgRect.tTopLeft.y = leftRect.y;
+				tmpResult.imgRect.tButtomRight.x = leftRect.br().x;
+				tmpResult.imgRect.tButtomRight.y = leftRect.br().y;
+
+				if (score)
+				{
+					if (tstrRes == L"l")
+					{
+						tstrRes = L"1";
+					}
+					if (tstrRes == L"B")
+					{
+						tstrRes = L"8";
+					}
+					if (tstrRes == L"O")
+					{
+						tstrRes = L"0";
+					}
+
+					tmpResult.dbConfi.push_back(dmin[0]/10000.0);
+					tmpResult.strResult = tstrRes;
+				}
+				else if (tstrRes == L"-" || tstrRes == L"^" || tstrRes == L".")
+				{
+					tmpResult.dbConfi.push_back(dmin[0]/10000.0);
+					tmpResult.strResult = L"-";
+				}
+				else
+				{
+					tmpResult.strResult = L"+";
+					tmpResult.dbConfi.push_back(0.6);
+				}
+
+				strResult.vecOcrRectResult.insert(it,1,tmpResult);
+			}
+		}
+	}
+
+	// 因字符合并而导致的识别置信度低问题处理
+	if (nCnt >= 3)
+	{
+		for (int i = 0; i < strResult.vecOcrRectResult.size(); i++)
+		{
+			if (strResult.vecOcrRectResult[i].dbConfi[0] < 0.2 && strResult.vecOcrRectResult[i].strResult != L"")
+			{
+				if ((strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - strResult.vecOcrRectResult[i].imgRect.tTopLeft.x) < nRefWidth * 0.4 / nCnt
+					&& (strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y) < nRefHeight * 0.4 / nCnt)
+				{
+					strResult.vecOcrRectResult[i].dbConfi[0] = 0;
+					strResult.vecOcrRectResult[i].strResult = L"";
+				}
+				else if (strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - strResult.vecOcrRectResult[i].imgRect.tTopLeft.x > nRefWidth * 1.3 / nCnt)
+				{
+					Rect leftRect = Rect();
+					leftRect.x = strResult.vecOcrRectResult[i].imgRect.tTopLeft.x;
+					leftRect.y = strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+					leftRect.width = (strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - strResult.vecOcrRectResult[i].imgRect.tTopLeft.x)/2;
+					leftRect.height = strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+
+					Rect rightRect = Rect();
+					rightRect.width = leftRect.width;
+					rightRect.height = leftRect.height;
+					rightRect.x = strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - rightRect.width + 1;
+					rightRect.y = strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+
+					{
+						Mat charLeftMat = tBwImg(leftRect);
+						tstring tstrResLeft;
+						long dminLeft[10];
+						if (charLeftMat.empty())
+						{
+							return -1;
+						}
+						OCREngine_Char(npntrHandle,1,charLeftMat,tstrResLeft,dminLeft);
+
+						Mat charRightMat = tBwImg(rightRect);
+						tstring tstrResRight;
+						long dminRight[10];
+						if (charRightMat.empty())
+						{
+							return -1;
+						}
+						OCREngine_Char(npntrHandle,1,charRightMat,tstrResRight,dminRight);
+
+						if ((dminRight[0] > strResult.vecOcrRectResult[i].dbConfi[0]*8000) && (dminLeft[0] > strResult.vecOcrRectResult[i].dbConfi[0]*8000) )
+						{
+							strResult.vecOcrRectResult[i].imgRect.tButtomRight.y = leftRect.br().y;
+							strResult.vecOcrRectResult[i].dbConfi[0] = dminLeft[0]/10000.0;
+							strResult.vecOcrRectResult[i].strResult = tstrResLeft;
+
+
+							vector<OcrRectResult>::iterator it = strResult.vecOcrRectResult.begin() + i + 1;
+							OcrRectResult tmpResult;
+							tmpResult.dbConfi.push_back(dminRight[0]/10000.0);
+							tmpResult.imgRect.tTopLeft.x = leftRect.x;
+							tmpResult.imgRect.tTopLeft.y = leftRect.y;
+							tmpResult.imgRect.tButtomRight.x = leftRect.br().x;
+							tmpResult.imgRect.tButtomRight.y = leftRect.br().y;
+							tmpResult.strResult = tstrResRight;
+							strResult.vecOcrRectResult.insert(it,1,tmpResult);
+
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 对可能存在的标点进行识别处理，只会有以下三种：“-”，“，”，“.”。
+	vector<int> vecDotIndex;
+	for(int i = 0; i < strResult.vecOcrRectResult.size() - 1; i++)
+	{
+		tstring rectResult = strResult.vecOcrRectResult[i].strResult.substr(0,1);
+		if (rectResult == L"")
+		{
+			Rect rect;
+			rect.x = strResult.vecOcrRectResult[i].imgRect.tTopLeft.x;
+			rect.y = strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+			rect.width = strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - rect.x + 1;
+			rect.height = strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - rect.y + 1;
+			Mat charMat = tBwImg(rect);
+
+
+			// 第一位：正负号判别,同时剔除掉异常位置的符号
+			if(i==0)
+			{	//if (rect.y > strResult.vecOcrRectResult[1].imgRect.tButtomRight.y)
+				if (rect.br().y < (strResult.vecOcrRectResult[1].imgRect.tButtomRight.y * 0.25 + strResult.vecOcrRectResult[1].imgRect.tTopLeft.y * 0.75)
+					|| rect.y > (strResult.vecOcrRectResult[1].imgRect.tButtomRight.y * 0.75 + strResult.vecOcrRectResult[1].imgRect.tTopLeft.y * 0.25))
+				{
+					continue;
+				}
+				tstring tstrRes;
+				long dmin[10];
+				if (charMat.empty())
+				{
+					return -1;
+				}
+				OCREngine_Char(npntrHandle,0,charMat,tstrRes,dmin);
+				if(tstrRes == L"-" || tstrRes == L".")
+				{
+					strResult.vecOcrRectResult[i].dbConfi[0] = 0.99;
+					strResult.vecOcrRectResult[i].strResult = L"-";
+				}
+				else
+				{
+					int charHeight = strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+					int charWidth = strResult.vecOcrRectResult[i].imgRect.tButtomRight.x - strResult.vecOcrRectResult[i].imgRect.tTopLeft.x;
+					if(((double)charWidth)/charHeight>1.5)
+					{
+						strResult.vecOcrRectResult[i].dbConfi[0] = 0.6;
+						strResult.vecOcrRectResult[i].strResult = L"-";
+					}
+					else
+					{
+						strResult.vecOcrRectResult[i].dbConfi[0] = 0.6;
+						strResult.vecOcrRectResult[i].strResult = L"+";
+					}
+				}
+			}
+			else if(i == strResult.vecOcrRectResult.size()-3)
+			{
+				tstring tstrRes;
+				long dmin[10];
+				if (charMat.empty())
+				{
+					return -1;
+				}
+				OCREngine_Char(npntrHandle,0,charMat,tstrRes,dmin);
+				if(tstrRes == L".")
+				{
+					strResult.vecOcrRectResult[i].dbConfi[0] = 0.99;
+					strResult.vecOcrRectResult[i].strResult = L".";
+				}
+				else
+				{
+					strResult.vecOcrRectResult[i].dbConfi[0] = 0;
+					strResult.vecOcrRectResult[i].strResult = L".";
+				}
+				vecDotIndex.push_back(i);
+			}
+			else
+			{
+				tstring tstrRes;
+				long dmin[10];
+				if (charMat.empty())
+				{
+					return -1;
+				}
+				OCREngine_Char(npntrHandle,0,charMat,tstrRes,dmin);
+				if(tstrRes == L",")
+				{
+					strResult.vecOcrRectResult[i].dbConfi[0] = 0;
+					strResult.vecOcrRectResult[i].strResult = L".";
+				}
+				else
+				{
+					strResult.vecOcrRectResult[i].dbConfi[0] = 0.99;
+					strResult.vecOcrRectResult[i].strResult = L".";
+				}
+				vecDotIndex.push_back(i);
+			}
+		}
+	}
+
+	// 最后两位的标点符号间距异常则全部剔除！！！ 20160818
+	if (vecDotIndex.size() > 1)
+	{
+		if (vecDotIndex[vecDotIndex.size() - 1] - vecDotIndex[vecDotIndex.size() - 2] == 4)
+		{
+			for (int i = 0; i < vecDotIndex.size() - 1; i++)
+			{
+				strResult.vecOcrRectResult[vecDotIndex[i]].strResult = L"";
+			}
+		}
+		else
+		{
+			for (int i = 0; i < vecDotIndex.size() - 2; i++)
+			{
+				strResult.vecOcrRectResult[vecDotIndex[i]].strResult = L"";
+			}
+
+			strResult.vecOcrRectResult[vecDotIndex[vecDotIndex.size()-1]].strResult = L"";
+
+			if (vecDotIndex[vecDotIndex.size() - 2] < strResult.vecOcrRectResult.size() - 4)
+			{
+				strResult.vecOcrRectResult[vecDotIndex[vecDotIndex.size() - 2]].strResult = L"";
+			}
+		}
+	}
+
+	if (vecDotIndex.size())
+	{
+		bPlu = true;
+
+		if (vecDotIndex[vecDotIndex.size()-1] < strResult.vecOcrRectResult.size() - 4)
+		{
+			strResult.vecOcrRectResult[vecDotIndex[vecDotIndex.size()-1]].strResult = L"";
+		}
+	}
+
+	// 剔除噪点干扰
+	if (strResult.vecOcrRectResult.size() > 1)
+	{
+		for (int i = 0; i < strResult.vecOcrRectResult.size(); i++)
+		{
+			if (strResult.vecOcrRectResult[i].dbConfi[0] < 0.01 && strResult.vecOcrRectResult[i].strResult != L"-" && strResult.vecOcrRectResult[i].strResult != L"." && strResult.vecOcrRectResult[i].strResult != L"+" )
+			{
+				if (i == 0)
+				{
+					int nRefHeight = strResult.vecOcrRectResult[i+1].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i+1].imgRect.tTopLeft.y;
+					int nCharHeight = strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+					if (nCharHeight < nRefHeight * 0.6)
+					{
+						strResult.vecOcrRectResult[i].strResult = L"";
+					}
+				}
+				else if (i == strResult.vecOcrRectResult.size() - 1)
+				{
+					int nRefHeight = strResult.vecOcrRectResult[i-1].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i-1].imgRect.tTopLeft.y;
+					int nCharHeight = strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+					if (nCharHeight < nRefHeight * 0.6)
+					{
+						strResult.vecOcrRectResult[i].strResult = L"";
+					}
+				}
+				else
+				{
+					int nLeftHeight = strResult.vecOcrRectResult[i-1].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i-1].imgRect.tTopLeft.y;
+					int nRightHeight = strResult.vecOcrRectResult[i+1].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i+1].imgRect.tTopLeft.y;
+					int nCharHeight =  strResult.vecOcrRectResult[i].imgRect.tButtomRight.y - strResult.vecOcrRectResult[i].imgRect.tTopLeft.y;
+					if (nCharHeight < (nLeftHeight + nRightHeight) * 0.3)
+					{
+						strResult.vecOcrRectResult[i].strResult = L"";
+					}
+				}
+			}
+		}
+	}
+
+	vector<OcrRectResult>::iterator pos = strResult.vecOcrRectResult.begin();
+	strResult.vecOcrRectResult.erase(remove_if(strResult.vecOcrRectResult.begin(), strResult.vecOcrRectResult.end(), remove_Amount_space), strResult.vecOcrRectResult.end());
+
+	bool bDotExits = false;
+	for (int i = 0; i < strResult.vecOcrRectResult.size(); i++)
+	{
+		if (strResult.vecOcrRectResult[i].strResult == L".")
+		{
+			bDotExits = true;
+			break;
+		}
+	}
+
+	// 对于未找到标点的数据采用其他方式进行标点的定位, 
+	if (strResult.vecOcrRectResult.size() >= 3 && !bDotExits && nCnt && bPlu)
+	{
+		int ResultSize = strResult.vecOcrRectResult.size() - 2;
+
+		while (ResultSize > 0 && ResultSize > strResult.vecOcrRectResult.size() - 5)
+		{
+			int nTmpWidth = strResult.vecOcrRectResult[ResultSize + 1].imgRect.tTopLeft.x -strResult.vecOcrRectResult[ResultSize].imgRect.tButtomRight.x;
+			int nTmpWidth2 = strResult.vecOcrRectResult[ResultSize].imgRect.tTopLeft.x - strResult.vecOcrRectResult[ResultSize - 1].imgRect.tButtomRight.x;
+
+			//if (nTmpWidth > nRefHeight *0.6 / nCnt && nTmpWidth < nRefHeight * 1.6 / nCnt)
+			if (nTmpWidth >= int(nRefWidth * 0.75 / nCnt) && nTmpWidth > nTmpWidth2)
+			{
+				vector<OcrRectResult>::iterator it = strResult.vecOcrRectResult.begin() + ResultSize + 1;
+				OcrRectResult tmpResult;
+				tmpResult.dbConfi.push_back(0.6);
+				tmpResult.imgRect.tTopLeft.x = strResult.vecOcrRectResult[ResultSize].imgRect.tButtomRight.x;
+				tmpResult.imgRect.tTopLeft.y = strResult.vecOcrRectResult[ResultSize].imgRect.tTopLeft.y;
+				tmpResult.imgRect.tButtomRight.x = strResult.vecOcrRectResult[ResultSize+1].imgRect.tTopLeft.x;
+				tmpResult.imgRect.tButtomRight.y = strResult.vecOcrRectResult[ResultSize+1].imgRect.tButtomRight.y;
+				tmpResult.strResult = L".";
+				strResult.vecOcrRectResult.insert(it,1,tmpResult);
+				bDotExits = true;
+				break;
+			}
+			ResultSize--;
+		}
+	}
+
+	//if (bPlu && !bDotExits && strResult.vecOcrRectResult.size() >= 3)
+	//{
+	//	int ResultSize = strResult.vecOcrRectResult.size() - 2;
+	//	vector<OcrRectResult>::iterator it = strResult.vecOcrRectResult.begin() + ResultSize;
+	//	OcrRectResult tmpResult;
+	//	tmpResult.dbConfi.push_back(0.0);
+	//	tmpResult.imgRect.tTopLeft.x = strResult.vecOcrRectResult[ResultSize].imgRect.tButtomRight.x;
+	//	tmpResult.imgRect.tTopLeft.y = strResult.vecOcrRectResult[ResultSize].imgRect.tTopLeft.y;
+	//	tmpResult.imgRect.tButtomRight.x = strResult.vecOcrRectResult[ResultSize+1].imgRect.tTopLeft.x;
+	//	tmpResult.imgRect.tButtomRight.y = strResult.vecOcrRectResult[ResultSize+1].imgRect.tButtomRight.y;
+	//	tmpResult.strResult = _T(".");
+	//	strResult.vecOcrRectResult.insert(it,1,tmpResult);
+	//}
+
+	return 0;
+}
+
+
+/// 计算列方向直方图
+void calcColHist(Mat bwImg, vector<int>& colHist)
+{
+	if (bwImg.empty() || bwImg.type() != CV_8UC1)
+	{
+		return;
+	}
+
+	colHist.clear();
+	colHist.resize(bwImg.cols);
+
+	for (int i = 0; i < bwImg.cols; i++)
+	{
+		colHist[i] = sum(bwImg.col(i)).val[0] / 255;
+	}
+}
+
+/// 计算行方向直方图
+void calcRowHist(Mat bwImg, vector<int>& rowHist)
+{
+	if (bwImg.empty() || bwImg.type() != CV_8UC1)
+	{
+		return;
+	}
+
+	rowHist.clear();
+	rowHist.resize(bwImg.rows);
+
+	for (int i = 0; i < bwImg.rows; i++)
+	{
+		rowHist[i] = sum(bwImg.row(i)).val[0] / 255;
+	}
+}
+
+typedef struct _tagSegPart{
+	int nStart;
+	int nEnd;
+
+	_tagSegPart(int _start, int _end)
+	{
+		this->nStart = _start;
+		this->nEnd = _end;
+	}
+}SegPart;
+
+/// 根据阈值划分直方图，直方图在进行划分之前最好是进行一次平滑，减小间隙干扰
+void segHist(vector<int> vecHist, float fThresh, vector<SegPart>& vSegPart)
+{
+	if (vecHist.empty() || fThresh < 0 || fThresh > 1)
+	{
+		return;
+	}
+
+	vector<int>::const_iterator pos = max_element(vecHist.begin(), vecHist.end());
+	float fRef = (*pos) * fThresh;
+	if (fRef < 1)
+	{
+		fRef = 1;
+	}
+
+	bool flag = false;
+	int nStart = 0, nEnd = 0;
+	for (int i = 0; i < vecHist.size(); i++)
+	{
+		if (!flag)
+		{
+			if (vecHist[i] > fRef)
+			{
+				nStart = i;
+				flag = true;
+			}
+		}
+		else
+		{
+			if (vecHist[i] <= fRef)
+			{
+				nEnd = i;
+				flag = false;
+
+				vSegPart.push_back(SegPart(nStart, nEnd));
+			}
+		}
+	}
+
+	if (flag)
+	{
+		vSegPart.push_back(SegPart(nStart, vecHist.size() - 1));
+	}
+}
+
+void newSegHist(vector<int> vecHist, int iThresh, vector<SegPart>& vSegPart)
+{
+	if (vecHist.empty() || iThresh < 0)
+	{
+		return;
+	}
+
+	bool flag = false;
+	int nStart = 0, nEnd = 0;
+	for (int i = 0; i < vecHist.size(); i++)
+	{
+		if (!flag)
+		{
+			if (vecHist[i] > iThresh)
+			{
+				nStart = i;
+				flag = true;
+			}
+		}
+		else
+		{
+			if (vecHist[i] <= iThresh)
+			{
+				nEnd = i - 1;
+				flag = false;
+
+				vSegPart.push_back(SegPart(nStart, nEnd));
+			}
+		}
+	}
+
+	if (flag)
+	{
+		vSegPart.push_back(SegPart(nStart, vecHist.size() - 1));
+	}
+}
+
+
+/// 多行混合字符识别（文字、数字、特殊字符（例如“（”、“）”等））：民主评议
+/// 姓名+性别+年龄
+int MultiLineMixForDiscussEngine(long handle, Mat tBw, string& strResult, float& conf)
+{
+	Mat tmp = tBw.clone();
+
+	int nHeight = tmp.rows;
+	int nWidth  = tmp.cols;
+
+	//行方向投影
+	vector<int> rowHist;
+	calcRowHist(tBw, rowHist);
+
+	//统计行数
+	vector<SegPart> vRowSegPart;
+	newSegHist(rowHist, 0, vRowSegPart);
+
+	if (vRowSegPart.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	int iMaxRowHeight = -1;
+	if (vRowSegPart.size() > 2)
+	{
+		for (int i = 0; i < vRowSegPart.size(); i++)
+		{
+			int iRowHeight = vRowSegPart[i].nEnd - vRowSegPart[i].nStart + 1;
+			if (iRowHeight > iMaxRowHeight)
+			{
+				iMaxRowHeight = iRowHeight;
+			}
+		}
+	}
+
+	//对每行混合字符进行处理
+	tstring tResult;
+	conf = 0;
+	for (int i = 0; i < vRowSegPart.size(); i++)
+	{
+		//初始化参数
+		int iRowHeight = vRowSegPart[i].nEnd - vRowSegPart[i].nStart + 1;
+		if (iRowHeight < 0.3 * iMaxRowHeight)
+		{
+			vector<SegPart>::iterator elem = vRowSegPart.begin() + i;
+			vRowSegPart.erase(elem);
+			--i;
+			continue;
+		}
+
+		Rect rRowPos = Rect(0, vRowSegPart[i].nStart, nWidth, iRowHeight);
+		Mat rowImg = tBw(rRowPos).clone();
+
+		vector<int>colHist;
+		vector<SegPart>vColSegPart;
+		if (vRowSegPart.size() > 1 && i == 0)
+		{
+			Mat tmpImg = Mat::zeros(rowImg.rows, rowImg.cols, CV_8UC1);
+
+			//对文字进行形态学闭运算
+			morphologyEx(rowImg, tmpImg, MORPH_CLOSE, Mat::ones(3, 3, CV_8UC1));
+			//dilate(tmpImg, tmpImg, Mat::ones(5, 5, CV_8UC1));
+
+			//列方向投影
+			calcColHist(tmpImg, colHist);
+
+			//统计字符数量
+			newSegHist(colHist, 0, vColSegPart);
+
+			//去噪声
+			int iMaxCharWidth = -1;
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+				if (iColWidth > iMaxCharWidth)
+				{
+					iMaxCharWidth = iColWidth;
+				}
+			}
+
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+
+				if (iColWidth < 0.3 * iMaxCharWidth)
+				{
+					vector<SegPart>::iterator elem = vColSegPart.begin() + j;
+					vColSegPart.erase(elem);
+					--j;
+				}
+			}
+
+			int iFirstPos = -1, iSecondPos = -1;
+			bool bFindMistake = false;
+			for(int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+				int iColHeigth = iRowHeight;
+
+				float fScale = (float)iColWidth / iColHeigth;
+
+				if (fScale < 0.8 && !bFindMistake)
+				{
+					iFirstPos = j;
+					bFindMistake = true;
+					continue;
+				}
+
+				if (bFindMistake)
+				{
+					if (fScale < 0.8)
+					{
+						vColSegPart[j].nStart = vColSegPart[j-1].nStart;
+						vector<SegPart>::iterator elem = vColSegPart.begin() + j - 1;
+						vColSegPart.erase(elem);
+						--j;
+					}
+					bFindMistake = false;
+				}
+			}
+		}
+		else
+		{
+			calcColHist(rowImg, colHist);
+
+			//统计字符数量
+			newSegHist(colHist, 0, vColSegPart);
+
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+
+				if (iColWidth < 3)
+				{
+					vector<SegPart>::iterator elem = vColSegPart.begin() + j;
+					vColSegPart.erase(elem);
+					--j;
+				}
+			}
+		}
+
+		tstring strChar;
+		long dmin[10];
+
+		if (i == 1)
+		{
+			tstring tmpResult;
+			bool bStartRecord = false;
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				Rect rChar = Rect(vColSegPart[j].nStart, 0, vColSegPart[j].nEnd - vColSegPart[j].nStart + 1, iRowHeight);
+				Mat charImg = rowImg(rChar);
+				OCREngine_Char(handle, CHARSET_ALL, charImg, strChar, dmin);
+
+				if (strChar.substr(0,1) == L"男" || strChar.substr(0,1) == L"女")
+				{
+					tResult += L"（";
+					tResult += strChar.substr(0,1);
+					conf += dmin[0];
+					tResult +=L"，";
+					conf += dmin[0] * 2;
+
+					bStartRecord = true;
+					++j;
+
+					continue;
+				} 
+
+				if (bStartRecord)
+				{
+					tResult += strChar.substr(0,1);
+					conf += dmin[0];
+
+					if (strChar.substr(0,1) == L"岁")
+					{
+						tResult += L"）";
+						conf += dmin[0];
+						break;			
+					}
+				}
+			}
+		} 
+		else
+		{
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				Rect rChar = Rect(vColSegPart[j].nStart, 0, vColSegPart[j].nEnd - vColSegPart[j].nStart + 1, iRowHeight);
+				Mat charImg = rowImg(rChar);
+				OCREngine_Char(handle, CHARSET_ALL, charImg, strChar, dmin);
+
+				tResult += strChar.substr(0,1);
+				conf += dmin[0];
+			}
+		}
+	}
+
+	if (tResult.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	conf /= tResult.size();
+
+	wideStr2shortStr(tResult, strResult);
+	return 1;
+}
+
+
+/// 多行混合字符识别（文字、数字、特殊字符（例如“（”、“）”等））：换届选举
+/// 姓名+性别+民族
+int MultiLineMixForSelectEngine(long handle, Mat tBw, string& strResult, float& conf)
+{
+	Mat tmp = tBw.clone();
+
+	int nHeight = tmp.rows;
+	int nWidth  = tmp.cols;
+
+	//行方向投影
+	vector<int> rowHist;
+	calcRowHist(tBw, rowHist);
+
+	//统计行数
+	vector<SegPart> vRowSegPart;
+	newSegHist(rowHist, 0, vRowSegPart);
+
+	if (vRowSegPart.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	int iMaxRowHeight = -1;
+	if (vRowSegPart.size() > 2)
+	{
+		for (int i = 0; i < vRowSegPart.size(); i++)
+		{
+			int iRowHeight = vRowSegPart[i].nEnd - vRowSegPart[i].nStart + 1;
+			if (iRowHeight > iMaxRowHeight)
+			{
+				iMaxRowHeight = iRowHeight;
+			}
+		}
+	}
+
+	//对每行混合字符进行处理
+	tstring tResult;
+	conf = 0;
+	for (int i = 0; i < vRowSegPart.size(); i++)
+	{
+		//初始化参数
+		int iRowHeight = vRowSegPart[i].nEnd - vRowSegPart[i].nStart + 1;
+		if (iRowHeight < 0.3 * iMaxRowHeight)
+		{
+			vector<SegPart>::iterator elem = vRowSegPart.begin() + i;
+			vRowSegPart.erase(elem);
+			--i;
+			continue;
+		}
+
+		Rect rRowPos = Rect(0, vRowSegPart[i].nStart, nWidth, iRowHeight);
+		Mat rowImg = tBw(rRowPos).clone();
+
+		vector<int>colHist;
+		vector<SegPart>vColSegPart;
+		if (vRowSegPart.size() > 1 && i == 0)
+		{
+			Mat tmpImg = Mat::zeros(rowImg.rows, rowImg.cols, CV_8UC1);
+
+			//对文字进行形态学闭运算
+			morphologyEx(rowImg, tmpImg, MORPH_CLOSE, Mat::ones(3, 3, CV_8UC1));
+			//dilate(tmpImg, tmpImg, Mat::ones(5, 5, CV_8UC1));
+
+			//列方向投影
+			calcColHist(tmpImg, colHist);
+
+			//统计字符数量
+			newSegHist(colHist, 0, vColSegPart);
+
+			//去噪声
+			int iMaxCharWidth = -1;
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+				if (iColWidth > iMaxCharWidth)
+				{
+					iMaxCharWidth = iColWidth;
+				}
+			}
+
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+
+				if (iColWidth < 0.3 * iMaxCharWidth)
+				{
+					vector<SegPart>::iterator elem = vColSegPart.begin() + j;
+					vColSegPart.erase(elem);
+					--j;
+				}
+			}
+
+			int iFirstPos = -1, iSecondPos = -1;
+			bool bFindMistake = false;
+			for(int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+				int iColHeigth = iRowHeight;
+
+				float fScale = (float)iColWidth / iColHeigth;
+
+				if (fScale < 0.8 && !bFindMistake)
+				{
+					iFirstPos = j;
+					bFindMistake = true;
+					continue;
+				}
+
+				if (bFindMistake)
+				{
+					if (fScale < 0.8)
+					{
+						vColSegPart[j].nStart = vColSegPart[j-1].nStart;
+						vector<SegPart>::iterator elem = vColSegPart.begin() + j - 1;
+						vColSegPart.erase(elem);
+						--j;
+					}
+					bFindMistake = false;
+				}
+			}
+		}
+		else
+		{
+			calcColHist(rowImg, colHist);
+
+			//统计字符数量
+			newSegHist(colHist, 0, vColSegPart);
+
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				int iColWidth = vColSegPart[j].nEnd - vColSegPart[j].nStart + 1;
+
+				if (iColWidth < 3)
+				{
+					vector<SegPart>::iterator elem = vColSegPart.begin() + j;
+					vColSegPart.erase(elem);
+					--j;
+				}
+			}
+		}
+
+		tstring strChar;
+		long dmin[10];
+
+		if (i == 1)
+		{
+			tstring tmpResult;
+			bool bStartRecord = false;
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				Rect rChar = Rect(vColSegPart[j].nStart, 0, vColSegPart[j].nEnd - vColSegPart[j].nStart + 1, iRowHeight);
+				Mat charImg = rowImg(rChar);
+				OCREngine_Char(handle, CHARSET_ALL, charImg, strChar, dmin);
+
+				if (strChar.substr(0,1) == L"男" || strChar.substr(0,1) == L"女")
+				{
+					tResult += L"（";
+					tResult += strChar.substr(0,1);
+					conf += dmin[0];
+					tResult +=L"，";
+					conf += dmin[0] * 2;
+
+					bStartRecord = true;
+					++j;
+
+					continue;
+				} 
+
+				if (bStartRecord)
+				{
+					tResult += strChar.substr(0,1);
+					conf += dmin[0];
+
+					if (strChar.substr(0,1) == L"族")
+					{
+						tResult += L"）";
+						conf += dmin[0];
+						break;			
+					}
+				}
+			}
+		} 
+		else
+		{
+			for (int j = 0; j < vColSegPart.size(); j++)
+			{
+				Rect rChar = Rect(vColSegPart[j].nStart, 0, vColSegPart[j].nEnd - vColSegPart[j].nStart + 1, iRowHeight);
+				Mat charImg = rowImg(rChar);
+				OCREngine_Char(handle, CHARSET_ALL, charImg, strChar, dmin);
+
+				tResult += strChar.substr(0,1);
+				conf += dmin[0];
+			}
+		}
+	}
+
+	if (tResult.size() < 1)
+	{
+		strResult = "";
+		conf = 0;
+		return 0;
+	}
+
+	conf /= tResult.size();
+
+	wideStr2shortStr(tResult, strResult);
+	return 1;
+}
+
+void multiLinePrintChinese(long handle, int nType, Mat bw,  string& str, float& dcf){
+	Mat tmp = bw.clone();
+	medianBlur(tmp, tmp, 3);
+	dilate(tmp, tmp, Mat::ones(3,3,CV_8UC1));
+
+	vector<int> rowHist;
+	vector<SegPart>vSegPart;
+	calcRowHist(tmp, rowHist);
+	segHist(rowHist, 0.01, vSegPart);
+
+	if (vSegPart.size() >= 2 && vSegPart[0].nEnd - vSegPart[0].nStart > 16 && vSegPart[1].nEnd - vSegPart[1].nStart > 16) {
+		for (int i = 0; i < vSegPart.size(); i++) {
+			tmp = bw(Range(vSegPart[i].nStart, vSegPart[i].nEnd), Range(0, bw.cols)).clone();
+			printChinese_classify(handle, nType, tmp, str, dcf);
+		}
+	}
+	else {
+		printChinese_classify(handle, nType, bw, str, dcf);
+	}
+}
+
+void timeAge(long handle, Mat bw,  string& str, float& dcf){
+	Mat tmp = bw.clone();
+	medianBlur(tmp, tmp, 3);
+	dilate(tmp, tmp, Mat::ones(3,3,CV_8UC1));
+
+	vector<int> rowHist;
+	vector<SegPart>vSegPart;
+	calcRowHist(tmp, rowHist);
+	segHist(rowHist, 0.01, vSegPart);
+
+	if (vSegPart.size() >= 2 && vSegPart[0].nEnd - vSegPart[0].nStart > 16 && vSegPart[1].nEnd - vSegPart[1].nStart > 16) {
+		for (int i = 0; i < vSegPart.size(); i++) {
+			tmp = bw(Range(vSegPart[i].nStart, vSegPart[i].nEnd), Range(0, bw.cols)).clone();
+			if (i == 0)
+			{
+				printChinese_classify(handle, FIV_TABLE_CHAR_NUMPUNC, tmp, str, dcf);
+			}
+			else{
+				printChinese_classify(handle, FIV_TABLE_CHAR_CHNNUMPUNC, tmp, str, dcf);
+			}
+
+		}
+	}
+	else {
+		printChinese_classify(handle, FIV_TABLE_CHAR_CHNNUMPUNC, bw, str, dcf);
+	}
+
+}
+
+bool iErrRect(Rect rc) {
+	return (rc.x == -1 || rc.y == -1 || rc.height <= 0 || rc.width <= 0);
+}
+
+// const tstring Field_True_Tick	= L"*";			/// 域 识别输出-"√"
+// const tstring Field_False_Tick	= L"#";			/// 域 识别输出-""
+// const tstring Field_False_Sig	= L"口□";		/// 域 识别结果-假
+// const tstring Field_True_Sig	= L"√vⅴYy";		/// 域 识别结果-真
+bool checkTrueTick(vector<string>& vStrResult)
+{
+	if (vStrResult.size() != 3)
+	{
+#ifdef _MIV_LOG_
+		LOG(ERROR) << "Data not Match Function.";
+#endif
+		return false;
+	}
+
+	vector<string> vRefResult;
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		vRefResult.push_back("");
+	}
+
+	/// check true 1
+	int nTrueTick[3] = {0,0,0};
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("√") != string::npos
+			|| vStrResult[i].find("v") != string::npos
+			|| vStrResult[i].find("ⅴ") != string::npos
+			|| vStrResult[i].find("Y") != string::npos
+			|| vStrResult[i].find("y") != string::npos)
+		{
+			nTrueTick[i] = 1;
+		}
+	}
+
+	if (nTrueTick[0] + nTrueTick[1] + nTrueTick[2] == 1)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nTrueTick[i])
+			{
+				vRefResult[i] += "(√)";
+			}
+			else
+			{
+				vRefResult[i] += "(x)";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	/// check false 1
+	int nFalseTick[3] = {0,0,0};
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("口") != string::npos
+			|| vStrResult[i].find("□") != string::npos)
+		{
+			nFalseTick[i] = 1;
+		}
+	}
+
+	if (nFalseTick[0] + nFalseTick[1] + nFalseTick[2] == 2)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nFalseTick[i])
+			{
+				vRefResult[i] += "(x)";
+			}
+			else
+			{
+				vRefResult[i] += "(√)";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	/// check true 2
+	nTrueTick[0] = 0;
+	nTrueTick[1] = 0;
+	nTrueTick[2] = 0;
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("/") != string::npos
+			|| vStrResult[i].find("曱") != string::npos
+			|| vStrResult[i].find("吖") != string::npos
+			|| vStrResult[i].find("回") != string::npos
+			|| vStrResult[i].find("囫") != string::npos
+			|| vStrResult[i].find("囵") != string::npos
+			|| vStrResult[i].find("囹") != string::npos)
+		{
+			nTrueTick[i] = 1;
+		}
+	}
+
+	if (nTrueTick[0] + nTrueTick[1] + nTrueTick[2] == 1)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nTrueTick[i])
+			{
+				vRefResult[i] += "(√)";
+			}
+			else
+			{
+				vRefResult[i] += "(x)";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	/// check false 2
+	nFalseTick[0] = 0;
+	nFalseTick[1] = 0;
+	nFalseTick[2] = 0;
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("口") != string::npos
+			|| vStrResult[i].find("□") != string::npos
+			|| vStrResult[i].find("日") != string::npos
+			|| vStrResult[i].find("曰") != string::npos)
+		{
+			nFalseTick[i] = 1;
+		}
+	}
+
+	if (nFalseTick[0] + nFalseTick[1] + nFalseTick[2] == 2)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nFalseTick[i])
+			{
+				vRefResult[i] += "(x)";
+			}
+			else
+			{
+				vRefResult[i] += "(√)";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	vStrResult = vRefResult;
+	return false;
+}
+
+void fieldLabelRecog(long handle, Mat tBw, string& str, float& dcf){
+	Mat tmp = tBw.clone();
+
+	int nHeight = tmp.rows;
+	int nWidth  = tmp.cols;
+
+	dilate(tmp, tmp, Mat::ones(15, 1, CV_8UC1));
+
+	vector<vector<Point>> contours;
+	findContours(tmp.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+
+	vector<Rect> vRect;
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+		if (rc.height < nHeight / 4)
+		{
+			continue;
+		}
+
+		vRect.push_back(rc);
+	}
+
+	if (vRect.size() < 1)
+	{
+		str = "";
+		dcf = 0;
+		return;
+	}
+
+	sort(vRect.begin(), vRect.end(), sortRectAscendX);
+
+	/// 合并1，重叠合并
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		if (iErrRect(vRect[i]))
+		{
+			continue;
+		}
+
+		int nIsx = vRect[i].x;
+		int nIex = vRect[i].br().x;
+		int nIsy = vRect[i].y;
+		int nIey = vRect[i].br().y;
+
+		for (int j = i + 1; j < vRect.size(); j++)
+		{
+			if (iErrRect(vRect[i]))
+			{
+				continue;
+			}
+
+			int nJsx = vRect[j].x;
+			int nJex = vRect[j].br().x;
+			int nJsy = vRect[j].y;
+			int nJey = vRect[j].br().y;
+
+			if ((nIsx <= nJsx&& nJsx < nIex) || (nIsx < nJex&& nJex <= nIex))
+			{
+				vRect[i].x = min(nIsx, nJsx);
+				vRect[i].y = min(nIsy, nJsy);
+				vRect[i].width = max(nIex, nJex) - vRect[i].x;
+				vRect[i].height = max(nIey, nJey) - vRect[i].y;
+
+				vRect[j].x = -1;
+
+				nIsx = vRect[i].x;
+				nIex = vRect[i].br().x;
+				nIsy = vRect[i].y;
+				nIey = vRect[i].br().y;
+			}
+		}
+	}
+
+	vRect.erase(remove_if(vRect.begin(), vRect.end(), errRect), vRect.end());
+
+	if (vRect.size() < 1)
+	{
+		str = "";
+		dcf = 0;
+		return;
+	}
+
+	tstring tResult;
+	int nRefMax = 0;
+	vector<int> vIntDist;
+	for (int i = 0; i < vRect.size(); i++)
+	{
+		tstring strChar;
+		long dmin[10] = {0};
+		Mat img = tBw(vRect[i]);
+		OCREngine_Char(handle, CHARSET_ALL, img, strChar, dmin);
+
+		tResult += strChar.substr(0,1);
+		if (vRect[i].width > vRect[i].height * 0.5)
+		{
+			vIntDist.push_back(vRect[i].width);
+		}		
+	}
+
+	nRefMax = getMedian(vIntDist);
+
+	if (vRect.size() < 1)
+	{
+		str = "";
+		dcf = 0;
+		return;
+	}
+
+	/// 区域划分
+	bool bBigSpace = false;
+	nRefMax = nRefMax * 2;
+	vector<int> vIntIdx;
+	for (int i = 0; i < vRect.size() - 1; i++)
+	{
+		if (vRect[i + 1].x - vRect[i].x > nRefMax)
+		{
+			bBigSpace = true;
+			vIntIdx.push_back(i);
+		}
+	}
+
+	vector<string> vStrResult;
+
+	if (!bBigSpace || vIntIdx.size() < 2) {
+		printChinese_classify(handle, FIV_TABLE_CHAR_CHNNUMPUNC, tBw, str, dcf);
+	}
+	else
+	{
+		if (vIntIdx.size() > 2)
+		{
+			while(vIntIdx.size() > 2)
+			{
+				int nMin = vRect[vIntIdx[0] + 1].x - vRect[vIntIdx[0]].x;
+				int nIdx = 0;
+				for (int i = 1; i < vIntIdx.size(); i++)
+				{
+					if (vRect[vIntIdx[i] + 1].x - vRect[vIntIdx[i]].x < nMin)
+					{
+						nIdx = i;
+					}
+				}
+				vIntIdx.erase(vIntIdx.begin() + nIdx);
+			}
+		}
+
+		Mat lefImg = tBw(Range(0, tBw.rows), Range(0, vRect[vIntIdx[0]].br().x));
+		Mat midImg = tBw(Range(0, tBw.rows), Range(vRect[vIntIdx[0]].br().x, vRect[vIntIdx[1]].br().x));
+		Mat rigImg = tBw(Range(0, tBw.rows), Range(vRect[vIntIdx[1]].br().x, tBw.cols));
+
+		string strlefResult, strmidResult, strrigResult;
+		float lefconf = 0, midconf = 0, rigconf = 0;
+		printChinese_classify(handle, FIV_TABLE_CHAR_CHNNUMPUNC, lefImg, strlefResult, lefconf);
+		printChinese_classify(handle, FIV_TABLE_CHAR_CHNNUMPUNC, midImg, strmidResult, midconf);
+		printChinese_classify(handle, FIV_TABLE_CHAR_CHNNUMPUNC, rigImg, strrigResult, rigconf);
+
+		vStrResult.push_back(strlefResult);
+		vStrResult.push_back(strmidResult);
+		vStrResult.push_back(strrigResult);
+		dcf = (lefconf + midconf + rigconf) / 3;
+
+		checkTrueTick(vStrResult);
+
+		for (int i = 0; i < vStrResult.size(); i++)
+		{
+			str += vStrResult[i];
+		}
+
+	}
+}
+
+int  fIv_table_ocr_form(long handle, int nType, Mat bwImg, string& str, float& dcf){	
+
+	if (handle <= 0) {
+		return -1;
+	}
+
+	if (bwImg.rows > 50)
+	{
+		float fRatio = 50.0 / bwImg.rows;
+		int nDstWidth = bwImg.cols * fRatio;
+		int nDstHeight = bwImg.rows * fRatio;
+		resize(bwImg, bwImg, Size(nDstWidth, nDstHeight));
+	}
+
+	switch (nType){
+	case FIV_TABLE_CHAR_NUMPUNC:
+		multiLinePrintChinese(handle, nType, bwImg, str, dcf);
+		break;
+
+	case FIV_TABLE_CHAR_CHNNUMPUNC:
+		multiLinePrintChinese(handle, nType, bwImg,  str, dcf);
+		break;
+
+	case FIV_TABLE_CHAR_NAMSEXAGE:
+		MultiLineMixForDiscussEngine(handle, bwImg, str, dcf);
+		break;
+
+	case FIV_TABLE_CHAR_NAMSEXNAT:
+		MultiLineMixForSelectEngine(handle, bwImg, str, dcf);
+		break;
+
+	case FIV_TABLE_CHAR_TIMEAGE:
+		timeAge(handle, bwImg, str, dcf);
+		break;
+
+	case FIV_TABLE_CHAR_FIELDBOX:
+		fieldLabelRecog(handle, bwImg, str, dcf);
+		break;
+
+	default:
+		multiLinePrintChinese(handle, FIV_TABLE_CHAR_CHNNUMPUNC, bwImg,  str, dcf);
+	}
+
+	return 1;
+}

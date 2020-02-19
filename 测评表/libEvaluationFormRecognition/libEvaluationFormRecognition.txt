@@ -1,0 +1,3787 @@
+#pragma once
+#include "stdafx.h"
+#include "mIvCommon.h"
+#include "libAllEngine.h"
+//#include "libEvaluationTable.h"
+#include "tinyxml.h"
+#include "libReadImageByFreeImage.h"
+#include "libLineDetectionAndRemove.h"
+#include "libEvaluationFormRecognition.h"
+#include "libSealRemove.h"
+#include "libDeskew.h"
+#include "MNist.h"
+
+//#pragma comment(lib, "MNist.lib")
+
+///测评表输入版式类型
+typedef enum{
+	IN_EVA_XRYR= 1,		               ///<选人用人工作民主评议表>
+	IN_EVA_XTB= 2,		                   ///<新提拔干部民主评议表>
+	IN_EVA_HGGB = 3,		               ///<会管单位会管干部年度考核测评表>
+	IN_EVA_HGBZ = 4,		   ///<会管单位领导班子年度考核测评表>
+}inEVAFormType;
+
+///测评表输出版式
+//typedef enum{
+//	OUT_EVA_XRYR= 5,		               ///<选人用人工作民主评议表>
+//	OUT_EVA_XTB= 6,		                   ///<新提拔干部民主评议表>
+//	OUT_EVA_HGGB = 7,		               ///<会管单位会管干部年度考核测评表>
+//	OUT_EVA_HGBZ_ZZYY = 8,		   ///<会管单位领导班子年度考核测评表(组织运营)>
+//	OUT_EVA_HGBZ_JGZC=9,            ///<会管单位领导班子年度考核测评表(监管支持)>
+//	OUT_EVA_HGBZ_ZLFW=10,           ///<会管单位领导班子年度考核测评表(自律服务)>
+//}outEVAFormType;
+
+
+#ifdef _WIN64
+#ifdef _DEBUG
+#pragma comment(lib,"libAllEngineD_x64.lib")
+#else
+#pragma comment(lib,"libAllEngine_x64.lib")
+#endif // _DEBUG
+#else
+#ifdef _DEBUG
+#pragma comment(lib,"libAllEngineD.lib")
+#pragma comment(lib, "MNistD.lib")
+#pragma comment(lib,"libLineDetectionAndRemoveD.lib")
+#else
+#pragma comment(lib,"libAllEngine.lib")
+#pragma comment(lib,"MNist.lib")
+#pragma comment(lib,"libLineDetectionAndRemove.lib")
+#endif
+#endif
+//#pragma comment(lib,"libAllEngineD.lib")
+#pragma comment(lib,"tinyxml.lib")
+
+//#define LINEDETECTREMOVE
+
+#define EVA_TYPE_ERR (-1)	/// 异常类型
+#define EVA_TYPE_NUM (0)	/// 手写数字
+#define EVA_TYPE_CHN (1)	/// 中文
+#define EVA_TYPE_SIG (2)	/// 符号
+#define EVA_TYPE_STR (3)	/// 手写中文串
+const tstring Field_True_Tick	= L"*";			/// 域 识别输出-"√"
+const tstring Field_False_Tick	= L"#";			/// 域 识别输出-""
+const tstring Field_False_Sig	= L"口□";		/// 域 识别结果-假
+const tstring Field_True_Sig	= L"√vⅴYy吖";	/// 域 识别结果-真
+const tstring Table_True_Sig	= L"√↙/VvYyJ";	/// 表 识别结果-真
+const tstring RetNull			= L"";			/// "空"
+
+typedef struct stOutputField
+{	
+	/// 通过XML文件确定
+	int iFieldPosition;			/// Field position
+	tstring tstrFieldName;		/// Field title
+
+	/// 通过Layout和识别确定
+	double dbConf;				/// Field recognition confidence	
+	tstring tstrFieldRecRes;	/// Field recognition result
+
+	/// 初始化
+	stOutputField()
+	{
+		this->tstrFieldName = L"";
+		this->tstrFieldRecRes = L"";
+		this->dbConf = 0.0;
+		this->iFieldPosition = 0;
+	}
+}OutField;
+
+typedef struct stCorrelatedCell
+{
+	/// 通过XML文件确定
+	int iRowNum;						/// Cell row position
+	int iColNum;						/// Cell col position	
+	tstring tstrCorrelatedContent;		/// Cell Title
+
+	/// 通过Layout和识别确定
+	double dbConf;						/// Cell recognition confidence
+	tstring tstrRecogContent;			/// Cell recognition result
+
+	/// 初始化
+	stCorrelatedCell()
+	{
+		this->iRowNum = 0;
+		this->iColNum = 0;
+		this->tstrCorrelatedContent = L"";
+		this->tstrRecogContent = L"";
+		this->dbConf = 0.0;
+	}
+}CorrectCell;
+
+typedef struct stOutputCell
+{
+	/// 通过XML文件确定
+	int iRowNum;							/// Table element row position
+	int iColNum;							/// Table element col position
+	int iPPCType;							/// Table element type
+
+	/// 通过Layout和识别确定
+	double dbConf;							/// Table element recognition confidence
+	tstring tstringContent;					/// Table element title
+	vector<CorrectCell> tCorrelatedCells;	/// Table element's attribute
+
+	/// 初始化
+	stOutputCell()
+	{
+		this->iRowNum = 0;
+		this->iColNum = 0;
+		this->iPPCType = 0;
+		this->tstringContent = L"";
+		this->dbConf = 0.0;
+		this->tCorrelatedCells.clear();
+	}
+}OutCell;
+
+/// 输出Table信息
+typedef struct stOutputTable
+{	
+	/// 通过XML文件确定
+	int iTablePosition;					/// Table position,有些测评表内部可能存在多个Table
+	tstring tstrTableName;				/// Table title
+
+	/// 通过Layout和识别确定
+	vector<OutCell> tOutputCellList;	/// Every table recognition result
+
+	/// 初始化
+	stOutputTable()
+	{
+		this->tstrTableName = L"";
+		this->iTablePosition = 0;
+		this->tOutputCellList.clear();
+	}
+}OutTable;
+
+/// 输出Model信息
+typedef struct stEvaluationOutputForm 
+{
+	vector<OutField> tOutputFieldsForm;
+	vector<OutTable> tOutputTableForm;
+	tstring tstrDocumentType;
+	int typeFlag;
+}OutForm;
+
+/// 预印字信息
+typedef struct stPrePrintPair
+{
+	stPrePrintPair()
+	{
+		tstrFieldName = tstring();
+		Contents.clear();
+	};
+	tstring tstrFieldName;		/// 组织名
+	vector<tstring> Contents;	/// 组织成员名
+}prePrint;
+
+typedef vector<prePrint> PrePrintInfos;
+
+
+/// 关于测评表中识别引擎调用关系的说明
+//	0数字，1汉字，2符号（勾、叉），3字符串 ，-1为do not care,即不用识别
+typedef struct stField
+{
+	/// 通过XML文件确定
+	char chFieldType;		// Field type.
+	tstring wstrFieldName;	// Field title.
+	int iPosition;			// Field position.
+	int iRowNum;			// Field row position.
+	int iFieldNumPerRow;	// Field number in per row.
+
+	/// 通过Layout和识别确定
+	Rect tFieldRect;		// Field rect.
+	int cof;				// Field recognition confidence.
+	string str;				// Field recognition result.
+
+	/// 初始化
+	stField()
+	{
+		this->chFieldType = 0;
+		this->wstrFieldName = L"";
+		this->tFieldRect = Rect();
+		this->iPosition = 0;
+		this->iRowNum = 0;
+		this->iFieldNumPerRow = 0;
+		this->str = "";
+		this->cof = 0;
+	}
+
+}Field;
+
+typedef struct stCell
+{
+	/// 通过XML文件确定
+	char chCellType;		// Cell type.				
+	int iRow;				// Cell row start position.	
+	int iCol;				// Cell col start position.	
+	int iRowEnd;			// Cell row end position.	
+	int iColEnd;			// Cell col end position.	
+
+	/// 通过Layout和识别确定
+	Rect tCellRect;			// Cell Rect.								
+	int cof;				// Cell recognition confidence.				
+	string str;				// Cell recognition result.					
+
+	/// 初始化
+	stCell()
+	{
+		this->chCellType = 0;
+		this->tCellRect = Rect();
+		this->iRow = 0;
+		this->iCol = 0;
+		this->iRowEnd = 0;
+		this->iColEnd = 0;
+		this->str = "";
+		this->cof = 0;
+	}
+}Cell;
+
+typedef vector<Field> Fields;
+typedef vector<Cell>  Tables;
+
+/// 输入Model信息
+typedef struct stModel
+{
+	Fields tFields;
+	Tables tTable;
+	int iProcssMethod;
+	tstring inPutModelType;
+}inModel;
+
+//所有识别前能确定的信息集
+typedef struct preStInfo
+{
+	PrePrintInfos m_prePrintInfos;
+	PrePrintInfos m_refCompPerson;
+	vector<inModel>m_inPutModel;
+	vector<OutForm>m_outRefForm;
+}allPreInfos;
+
+typedef struct _tagEngine{
+	long modelHandle;
+	long recogHandle;
+	_tagEngine(){
+		modelHandle = 0;
+		recogHandle = 0;
+	}
+} eva_form_recog_allHandle;
+
+//一些内部使用函数的声明
+int eva_form_recog_load_all_model(string modelPath,long& mHandle);//加载所有预设模板信息
+//int eva_form_recog_judge_input_model();
+//int eva_form_recog_layoutanalysis(long handle,string imgPath,Mat& g_bwImg,Mat& g_resizeImg,inModel& m_inModel,OutForm& m_outModel);
+//int eva_form_recog_fields_cell();
+bool sortOutCellArray(const OutCell &tOC1, const OutCell &tOC2)
+{
+	if (tOC1.iRowNum < tOC2.iRowNum)
+	{
+		return true;
+	}
+	else if (tOC1.iRowNum == tOC2.iRowNum)
+	{
+		if (tOC1.iColNum < tOC2.iColNum)
+		{
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	else
+	{
+		return false;
+	}
+}
+
+/// 添加预印字信息到已有预印字信息集中
+void PushBack(prePrint &tPrePrintPair, PrePrintInfos &tCompanyPersonNameInfos)
+{
+	CHECK_GT(tPrePrintPair.Contents.size(), 0);
+
+	bool bExistCompanyName = false;
+	bool bExistPersonName = false;
+
+	for (int i = 0; i < tCompanyPersonNameInfos.size(); i++)
+	{
+		/// 公司名称匹配成功
+		if (tCompanyPersonNameInfos[i].tstrFieldName == tPrePrintPair.tstrFieldName)
+		{
+			bExistCompanyName = true;
+
+			for (int j = 0; j < tPrePrintPair.Contents.size(); j++)
+			{
+				bExistPersonName = false;
+
+				for (int k = 0; k < tCompanyPersonNameInfos[i].Contents.size(); k++)
+				{
+					/// 员工名称匹配成功
+					if (tPrePrintPair.Contents[j] == tCompanyPersonNameInfos[i].Contents[k])
+					{
+						bExistPersonName = true;
+						break;
+					}
+				}
+
+				/// 员工名称匹配失败，直接嵌入
+				if (!bExistPersonName)
+				{
+					tCompanyPersonNameInfos[i].Contents.push_back(tPrePrintPair.Contents[j]);
+				}
+			}
+
+			break;
+		}
+	}
+
+	/// 公司名称匹配失败，直接嵌入
+	if (!bExistCompanyName)
+	{
+		tCompanyPersonNameInfos.push_back(tPrePrintPair);
+	}	
+}
+bool LoadingPrePrintInfo(string strXmlPath, PrePrintInfos &tPrePrintInfos)
+{
+	TiXmlDocument myDocument(strXmlPath.c_str());
+	if (!myDocument.LoadFile())
+	{
+		LOG(ERROR) << "Load PrePrint Infos XML File Failed!";
+		return false;
+	}
+
+	// Get Root Element [PrePrint]
+	TiXmlElement *pPrePrintRootElement = myDocument.RootElement();
+	if (NULL == pPrePrintRootElement)
+	{
+		return false;
+	}
+
+	// Get Fields [PrePrint\\Fields]
+	TiXmlElement *pFieldsElement = pPrePrintRootElement->FirstChildElement("Fields");
+	if (NULL == pFieldsElement)
+	{
+		return false;
+	}
+
+	//tPrePrintInfos.clear();
+
+	// Get All Field [PrePrint\\Fields\\...Field]
+	TiXmlElement *pFieldElement = pFieldsElement->FirstChildElement();
+	while (NULL != pFieldElement)
+	{
+		prePrint tPrePriPair;
+
+		// Get Name [PrePrint\\Fields\\...Field\\Name]
+		TiXmlElement *pName = pFieldElement->FirstChildElement("Name");
+		if (NULL == pName)
+		{
+			return false;
+		}
+
+		const char *pValue = pName->GetText();
+		tPrePriPair.tstrFieldName = classToWStr<string>(pValue);
+
+		// Get Name [PrePrint\\Fields\\...Field\\...Content]
+		TiXmlElement *pContent = pFieldElement->FirstChildElement("Content");
+		if (NULL == pName)
+		{
+			return false;
+		}
+
+		while(NULL != pContent)//加载预印单位信息
+		{
+			pValue = pContent->GetText();
+			tPrePriPair.Contents.push_back(classToWStr<string>(pValue));
+
+			pContent = pContent->NextSiblingElement();
+		}
+
+		sort(tPrePriPair.Contents.begin(), tPrePriPair.Contents.end());
+
+		//tPrePrintInfos.push_back(tPrePriPair);
+		PushBack(tPrePriPair, tPrePrintInfos);
+
+		pFieldElement = pFieldElement->NextSiblingElement();
+	}
+
+	return true;
+}
+
+/// 载入公司名称已经公司员工名称
+bool LoadingCompanyPersonName(string strTxtPath, PrePrintInfos &tCompanyPersonNameInfos)
+{
+	ifstream ifs_file(strTxtPath);
+
+	if (!ifs_file.is_open())
+	{
+		LOG(ERROR) << "Load Company and Person Name File Failed!";
+		return false;
+	}
+
+	string strLine = string();
+	prePrint tPrePrintPair;
+
+	while (!ifs_file.eof())
+	{
+		getline(ifs_file, strLine);
+		if (strLine == "" || strLine.length() < 1)
+		{
+			continue;
+		}
+
+		/// 根据":"的有无判断是否为公司，存在一定的bug，暂时无问题
+		string::size_type iDx = strLine.find(':');
+		if (iDx == string::npos)
+		{
+			tstring tstrPersonName = classToWStr<string>(strLine);
+			tPrePrintPair.Contents.push_back(tstrPersonName);
+		}
+		else
+		{
+			if (!tPrePrintPair.Contents.empty())
+			{				
+				PushBack(tPrePrintPair, tCompanyPersonNameInfos);
+				tPrePrintPair.Contents.clear();
+				tPrePrintPair.tstrFieldName = tstring();
+			}
+
+			tstring tstrCompanyName = classToWStr<string>(strLine.substr(0, iDx));								
+			tPrePrintPair.tstrFieldName = tstrCompanyName;
+		}
+	}
+
+	/// 最后一组预印字信息添加
+	if (!tPrePrintPair.Contents.empty())
+	{
+		PushBack(tPrePrintPair, tCompanyPersonNameInfos);
+		tPrePrintPair.Contents.clear();
+		tPrePrintPair.tstrFieldName = tstring();
+	}
+
+	ifs_file.close();
+
+	return true;
+}
+
+bool LoadInputForm(string filename, inModel& stModel)
+{
+	TiXmlDocument myDocument(filename.c_str());
+	bool bSucess = myDocument.LoadFile();
+	if (!bSucess)
+	{
+		LOG(ERROR) << "Open Input Model Form XML File Failed!";
+		return false;
+	}
+
+	TiXmlElement* modelElement = myDocument.RootElement();  //Model
+	if (!modelElement)
+	{
+		return false;
+	}
+
+	//ProcessMethod
+	TiXmlElement* processMethodElement = modelElement->FirstChildElement("ProcessMethod"); //ProcessMethod
+	if (!processMethodElement)
+	{
+		return false;
+	}
+	const char *pValue;
+	pValue = processMethodElement->GetText();
+	stModel.iProcssMethod = atoi(pValue);
+
+	//InPutModeltype
+	TiXmlElement* inPutTypeElement = modelElement->FirstChildElement("InModelType");
+	if (!inPutTypeElement)
+	{
+		return false;
+	}
+	const char *iValue;
+	iValue = inPutTypeElement->GetText();
+	stModel.inPutModelType= classToWStr<string>(iValue);
+	//Fields
+	TiXmlElement* fieldsElement = modelElement->FirstChildElement("Fields"); //Fields
+	if (!fieldsElement)
+	{
+		return false;
+	}
+
+	Fields tFields;
+	TiXmlElement* field = fieldsElement->FirstChildElement(); 
+	while (NULL != field)
+	{
+		TiXmlElement* f = field->FirstChildElement();
+		if (NULL == f)
+		{
+			return false;
+		}
+		Field tField;
+		const char *pValue = f->GetText();
+		tField.wstrFieldName = classToWStr<string>(pValue);
+
+		f = f->NextSiblingElement();
+		if (NULL == f)
+		{
+			return false;
+		}
+		pValue = f->GetText();
+		tField.iPosition = atoi(pValue);
+
+		f = f->NextSiblingElement();
+		if (NULL == f)
+		{
+			return false;
+		}
+		pValue = f->GetText();
+		tField.chFieldType = atoi(pValue);
+
+		f = f->NextSiblingElement();
+		if (NULL == f)
+		{
+			return false;
+		}
+		pValue = f->GetText();
+		tField.iRowNum = atoi(pValue);
+
+		f = f->NextSiblingElement();
+		if (NULL == f)
+		{
+			return false;
+		}
+		pValue = f->GetText();
+		tField.iFieldNumPerRow = atoi(pValue);
+
+		tFields.push_back(tField);
+
+		field = field->NextSiblingElement();
+	}
+
+	//Table
+	TiXmlElement* tableElement = modelElement->FirstChildElement("Table"); //Table
+	if (!tableElement)
+	{
+		return false;
+	}
+
+	Tables tTable;
+	TiXmlElement* cell = tableElement->FirstChildElement();
+	while (NULL != cell)
+	{
+		TiXmlElement* c = cell->FirstChildElement();
+		if (NULL == c)
+		{
+			return false;
+		}
+
+		Cell tCell;
+		const char *pValue;
+		pValue = c->GetText();
+		int iRow = atoi(pValue);
+		tCell.iRow = iRow;
+
+		c = c->NextSiblingElement();
+		if (NULL == c)
+		{
+			return false;
+		}
+
+		pValue = c->GetText();
+		int iCol = atoi(pValue);
+		tCell.iCol = iCol;
+
+		c = c->NextSiblingElement();
+		if (NULL == c)
+		{
+			return false;
+		}
+
+		pValue = c->GetText();
+		int iRowEnd = atoi(pValue);
+		tCell.iRowEnd = iRowEnd;
+
+		c = c->NextSiblingElement();
+		if (NULL == c)
+		{
+			return false;
+		}
+
+		pValue = c->GetText();
+		int iColEnd = atoi(pValue);
+		tCell.iColEnd = iColEnd;
+
+		c = c->NextSiblingElement();
+		if (NULL == c)
+		{
+			return false;
+		}
+
+		pValue = c->GetText();
+		char chType = atoi(pValue);
+		tCell.chCellType = chType;
+
+		tTable.push_back(tCell);
+
+		cell = cell->NextSiblingElement();
+	}
+
+	stModel.tFields = tFields;
+	stModel.tTable = tTable;
+
+	return true;
+}
+
+bool LoadingOutputForm(string strXmlPath, OutForm &tEvaluationOutputForm)
+{
+	tEvaluationOutputForm.tOutputFieldsForm.clear();
+	tEvaluationOutputForm.tOutputTableForm.clear();
+
+	TiXmlDocument myDocument(strXmlPath.c_str());
+	if (!myDocument.LoadFile())
+	{
+		LOG(ERROR) << "Load Output Model Form XML File Failed!";
+		return false;
+	}
+
+	// Get Root Element <ResultForm>
+	TiXmlElement *pResultFormRootElement = myDocument.RootElement();
+	if (NULL == pResultFormRootElement)
+	{
+		return false;
+	}
+
+	// Get <ResultForm> - <DocumentType>
+	TiXmlElement *pDocumentType = pResultFormRootElement->FirstChildElement("DocumentType");
+	if (NULL == pDocumentType)
+	{
+		return false;
+	}
+
+	const char *pcType = pDocumentType->GetText();
+	tEvaluationOutputForm.tstrDocumentType = classToWStr<string>(pcType);
+
+	//Get<ResultForm>-<TypeFlag>
+	TiXmlElement *pTypeFlag = pResultFormRootElement->FirstChildElement("TypeFlag");
+	if (NULL == pTypeFlag)
+	{
+		return false;
+	}
+	const char *pTypeValue;
+	pTypeValue = pTypeFlag->GetText();
+	tEvaluationOutputForm.typeFlag=atoi(pTypeValue);
+	// Get <ResultForm> - <Fields>
+	TiXmlElement *pFields = pResultFormRootElement->FirstChildElement("Fields");
+	if (NULL == pFields)
+	{
+		return false;
+	}
+
+	// Get <ResultForm> - <Fields> - ALL<Field>
+	TiXmlElement *pField = pFields->FirstChildElement("Field");
+	if (NULL == pField)
+	{
+		return false;
+	}
+
+	while (NULL != pField)
+	{
+		OutField tOutputField;
+		tOutputField.dbConf = 0.;
+		tOutputField.tstrFieldRecRes = tstring();
+		tOutputField.tstrFieldName = tstring();
+		tOutputField.iFieldPosition = -1;
+
+		TiXmlElement *pFieldName = pField->FirstChildElement("FieldName");
+		if (NULL == pFieldName)
+		{
+			return false;
+		}
+
+		const char *pValue = pFieldName->GetText();		
+		tOutputField.tstrFieldName = classToWStr<string>(pValue);
+
+		TiXmlElement *pFieldPosition = pField->FirstChildElement("FieldPosition");
+		if (NULL == pFieldPosition)
+		{
+			return false;
+		}
+
+		pValue = pFieldPosition->GetText();
+		tOutputField.iFieldPosition = atoi(pValue);
+
+		tEvaluationOutputForm.tOutputFieldsForm.push_back(tOutputField);
+		pField = pField->NextSiblingElement();
+	}	// end of --- while (NULL != pField) 
+
+	// Get <ResultForm> - All<Table>
+	TiXmlElement *pTable = pResultFormRootElement->FirstChildElement("Table");
+	while (NULL != pTable)
+	{
+		OutTable tOutputTable;
+		TiXmlElement *pTableName = pTable->FirstChildElement("TableName");
+		if (NULL == pTableName)
+		{
+			tOutputTable.tstrTableName = RetNull;
+		}
+		else
+		{
+			const char *pValue = pTableName->GetText();
+			tOutputTable.tstrTableName = classToWStr<string>(pValue);
+		}
+
+		TiXmlElement *pTablePosition = pTable->FirstChildElement("TablePosition");
+		if (NULL == pTablePosition)
+		{
+			tOutputTable.iTablePosition = 0;
+		}
+		else
+		{
+			const char *pValue = pTablePosition->GetText();
+			tOutputTable.iTablePosition = atoi(pValue);
+		}
+
+		TiXmlElement *pOutPutCell = pTable->FirstChildElement("OutPutCell");
+		if (NULL == pOutPutCell)
+		{
+			return false;
+		}
+
+		while (NULL != pOutPutCell)
+		{
+			OutCell tOutputCell;
+			tOutputCell.dbConf = 0.;
+
+			TiXmlElement *pRow = pOutPutCell->FirstChildElement("Row");
+			if (NULL == pRow)
+			{
+				return false;
+			}
+
+			const char *pValue = pRow->GetText();
+			tOutputCell.iRowNum = atoi(pValue);
+
+			TiXmlElement *pCol = pOutPutCell->FirstChildElement("Col");
+			if (NULL == pCol)
+			{
+				return false;
+			}
+
+			pValue = pCol->GetText();
+			tOutputCell.iColNum = atoi(pValue);
+
+			TiXmlElement *pPPCType = pOutPutCell->FirstChildElement("PPCType");
+			if (NULL == pPPCType)
+			{
+				return false;
+			}
+
+			pValue = pPPCType->GetText();
+			tOutputCell.iPPCType = atoi(pValue);
+
+			TiXmlElement *pContent = pOutPutCell->FirstChildElement("Content");
+			if (NULL == pContent)
+			{
+				tOutputCell.tstringContent = RetNull;
+			}
+
+			pValue = pContent->GetText();			
+			tOutputCell.tstringContent = classToWStr<string>(pValue);
+
+			TiXmlElement *pCorrelatedCells = pOutPutCell->FirstChildElement("CorrelatedCells");
+			if (NULL == pCorrelatedCells)
+			{
+				continue;
+			}
+
+			TiXmlElement *pCorrelatedCell = pCorrelatedCells->FirstChildElement("CorrelatedCell");
+			if (NULL == pCorrelatedCell)
+			{
+				return false;
+			}
+
+			while (NULL != pCorrelatedCell)
+			{
+				CorrectCell tCorrelatedCell;
+				TiXmlElement *p_Row = pCorrelatedCell->FirstChildElement("Row");
+				if (NULL == p_Row)
+				{
+					return false;
+				}
+
+				pValue = p_Row->GetText();
+				tCorrelatedCell.iRowNum = atoi(pValue);
+
+				TiXmlElement *p_Col = pCorrelatedCell->FirstChildElement("Col");
+				if (NULL == p_Col)
+				{
+					return false;
+				}
+
+				pValue = p_Col->GetText();
+				tCorrelatedCell.iColNum = atoi(pValue);
+
+				TiXmlElement *p_CorrelatedContent = pCorrelatedCell->FirstChildElement("CorrelatedContent");
+				if (NULL == p_CorrelatedContent)
+				{
+					tCorrelatedCell.tstrCorrelatedContent = RetNull;
+				}
+
+				pValue = p_CorrelatedContent->GetText();				
+				tCorrelatedCell.tstrCorrelatedContent = classToWStr<string>(pValue);
+
+				/// Add tCorrelatedCell
+				tOutputCell.tCorrelatedCells.push_back(tCorrelatedCell);
+				pCorrelatedCell = pCorrelatedCell->NextSiblingElement();
+			}	// while (NULL != pCorrelatedCell)
+
+			/// Add tOutputCell
+			tOutputTable.tOutputCellList.push_back(tOutputCell);
+			pOutPutCell = pOutPutCell->NextSiblingElement();
+		}	// while (NULL != pOutPutCell)
+
+		sort(tOutputTable.tOutputCellList.begin(), tOutputTable.tOutputCellList.end(), sortOutCellArray);
+
+		tEvaluationOutputForm.tOutputTableForm.push_back(tOutputTable);
+		pTable = pTable->NextSiblingElement();
+	}	// while (NULL != pTable)
+
+	return true;
+}
+bool eva_mnist_init(string mnistPath)
+{
+	string strModelPath = mnistPath+"CNN[20140222].nnt";
+
+	CMNistApp * tMNistInstance = MNIST_GetInstanceOfCMNistApp();
+	if (tMNistInstance == NULL)
+	{
+		return false;
+	}
+
+	bool bSuc = MNIST_InitModel(strModelPath);
+
+	return bSuc;
+}
+///所有识别引擎一次性加载
+LIBEVALUATIONFORMRECOGNITION_API int eva_form_recog_init(string enginePath,string modelPath, long& allHandle)
+{
+	if (!(enginePath.size()&&modelPath.size()))
+	{
+		return EVA_RET_ERR_MODEL;
+	}
+
+	if (modelPath.find("\\")==string::npos)
+	{
+		if (modelPath.find_last_of("/")!=modelPath.size()-1)
+		{
+			modelPath=modelPath+"/";
+		}
+	} 
+	else
+	{
+		if (modelPath.find_last_of("\\")!=modelPath.size()-1)
+		{
+			modelPath=modelPath+"\\";
+		}
+	}
+
+	if (enginePath.find("\\")==string::npos)
+	{
+		if (enginePath.find_last_of("/")!=enginePath.size()-1)
+		{
+			enginePath=enginePath+"/";
+		}
+	} 
+	else
+	{
+		if (enginePath.find_last_of("\\")!=enginePath.size()-1)
+		{
+			enginePath=enginePath+"\\";
+		}
+	}
+	long eHandle,preHandle;
+	eHandle=0;
+	preHandle=0;
+
+	eHandle = AllEngine_Init(enginePath.c_str());
+	//clearElement();
+	eva_mnist_init(enginePath);//手写数字识别引擎单独加载
+	LOG(INFO)<<"load engine.";
+	if(eHandle<0)
+	{
+		LOG(ERROR)<<"引擎加载失败";
+		return EVA_RET_ERR_HANDLE;
+	}
+	int ret=eva_form_recog_load_all_model(modelPath,preHandle);//加载所有输入模板、输出模板和预印信息
+	if(ret<0)
+	{
+		return EVA_RET_ERR_HANDLE;
+	}
+	eva_form_recog_allHandle* allHandles=new eva_form_recog_allHandle;
+	allHandles->modelHandle=preHandle;
+	allHandles->recogHandle=eHandle;
+	allHandle=long(allHandles);
+	return EVA_RET_OK;
+}
+
+
+///所有预设信息一次性加载
+int eva_form_recog_load_all_model(string modelPath,long& mHandle)
+{
+	if (!modelPath.size())
+	{
+		LOG(ERROR)<<"请检查模型路径";
+		return 	EVA_RET_ERR_MODEL;
+	}
+	allPreInfos* allPriorInfo=new allPreInfos;
+	if (modelPath.find("\\")==string::npos)
+	{
+		if (modelPath.find_last_of("/")!=modelPath.size()-1)
+		{
+			modelPath=modelPath+"/";
+		}
+	} 
+	else
+	{
+		if (modelPath.find_last_of("\\")!=modelPath.size()-1)
+		{
+			modelPath=modelPath+"\\";
+		}
+	}
+	//预印区域加载
+	string prePrintPath=modelPath+"预印区域.xml";
+	PrePrintInfos m_prePrint;
+	m_prePrint.clear();
+	bool pRet=LoadingPrePrintInfo(prePrintPath,m_prePrint);
+	//工作单位与姓名加载
+	string namesPath=modelPath+"工作单位与姓名.txt";
+	PrePrintInfos m_Names;
+	m_Names.clear();
+	bool nRet= LoadingCompanyPersonName(namesPath,m_Names);
+	if (pRet&&nRet==0)
+	{
+		return EVA_RET_ERR_MODEL;
+	}
+	//加载所有输入版式
+	vector<string> m_inPutFormName;
+	m_inPutFormName.push_back(modelPath+"会管单位会管干部年度考核测评表.xml");
+	m_inPutFormName.push_back(modelPath+"会管单位领导班子年度考核测评表.xml");
+	//m_inPutFormName.push_back(modelPath+"会管单位领导班子年度考核测评表_市场组织和运营类.xml");
+	//m_inPutFormName.push_back(modelPath+"会管单位领导班子年度考核测评表_自律服务类.xml");
+	m_inPutFormName.push_back(modelPath+"新提拔干部民主评议表.xml");
+	m_inPutFormName.push_back(modelPath+"选人用人工作民主评议表.xml");
+	bool inputRet=false;
+	inModel tmpInModel;
+	vector<inModel> m_inModels;
+	for (int i=0;i<m_inPutFormName.size();i++)
+	{
+		inputRet=LoadInputForm(m_inPutFormName[i],tmpInModel);
+		if (!inputRet)
+		{
+			return EVA_RET_ERR_MODEL;
+			break;
+		}
+		m_inModels.push_back(tmpInModel);
+	}
+
+	//加载所有输出版式
+	vector<string> m_outPutFormName;
+	m_outPutFormName.push_back(modelPath+"会管单位会管干部年度考核测评表_格式化输出结构.xml");
+	m_outPutFormName.push_back(modelPath+"会管单位领导班子年度考核测评表_监管支持类_格式化输出结构.xml");
+	m_outPutFormName.push_back(modelPath+"选人用人工作民主评议表_格式化输出结构.xml");
+	m_outPutFormName.push_back(modelPath+"会管单位领导班子年度考核测评表_自律服务类_格式化输出结构.xml");
+	m_outPutFormName.push_back(modelPath+"新提拔干部民主评议表_格式化输出结构.xml");
+	m_outPutFormName.push_back(modelPath+"会管单位领导班子年度考核测评表_市场组织和运营类_格式化输出结构.xml");
+
+
+	bool outPutRet=false;
+	OutForm tmpOutModel;
+	vector<OutForm> m_outModels;
+	for (int j=0;j<m_outPutFormName.size();j++)
+	{
+		outPutRet=LoadingOutputForm(m_outPutFormName[j],tmpOutModel);
+		if (!outPutRet)
+		{
+			return EVA_RET_ERR_MODEL;
+			break;
+		}
+		m_outModels.push_back(tmpOutModel);
+	}
+	allPriorInfo->m_inPutModel=m_inModels;
+	allPriorInfo->m_outRefForm=m_outModels;
+	allPriorInfo->m_prePrintInfos=m_prePrint;
+	allPriorInfo->m_refCompPerson=m_Names;
+	mHandle=(long)allPriorInfo;
+	LOG(INFO)<<"模板加载成功";
+	//allPreInfos* preInfos=(allPreInfos*)mHandle;
+	return EVA_RET_OK;
+}
+
+void eva_form_recog_free_model(long& modelHandle)
+{
+	if (modelHandle>0)
+	{
+		allPreInfos* model=(allPreInfos*)modelHandle;
+		model->m_inPutModel.clear();
+		model->m_outRefForm.clear();
+		model->m_prePrintInfos.clear();
+		model->m_refCompPerson.clear();
+		delete model;
+		model=NULL;
+	}
+	modelHandle=0;
+}
+
+//mnist引擎释放
+bool eva_mnist_uninit()
+{
+	CMNistApp * tMNistInstance = MNIST_GetInstanceOfCMNistApp();
+	if (tMNistInstance == NULL)
+	{
+		return false;
+	}
+
+	bool bSuc = MNIST_unInitModel();
+
+	return bSuc;
+}
+//模型和引擎句柄释放
+LIBEVALUATIONFORMRECOGNITION_API void eva_form_recog_uninit(long&handle)
+{
+	if (handle>0)
+	{
+		eva_form_recog_allHandle* allEngine=(eva_form_recog_allHandle*)handle;
+		AllEngine_UnInit(allEngine->recogHandle);
+		eva_form_recog_free_model(allEngine->modelHandle);
+		eva_mnist_uninit();
+		delete allEngine;
+		allEngine=NULL;
+		LOG(DEBUG) << "引擎已被释放";
+	} 
+	else
+	{
+		LOG(DEBUG) << "引擎已被释放";
+	}
+	handle=0;
+	return;
+}
+
+///图像预处理（包括去印章、尺寸限定、边界去黑边、噪声去除）
+bool getStandardImage(Mat src,Mat& resizeImg,int blackEdgeRemovedPad)
+{
+	if (src.empty())
+	{
+		LOG(ERROR) << "Picture is not exist!";
+		return false;
+	}
+
+	/// 1、去印章
+	SealRemove_RemoveRedByRgb(src, 1.0, resizeImg);
+	//cvtColor(resizeImg, resizeImg, COLOR_BGR2GRAY);
+
+	/// 2、大小限定
+	//不论大小统一归一化到最长边3500
+	if (resizeImg.rows>=resizeImg.cols)
+	{
+		resize(resizeImg,resizeImg,Size(resizeImg.cols*1.0*3500/resizeImg.rows,3500));
+	} 
+	else
+	{
+		resize(resizeImg,resizeImg,Size(3500,resizeImg.rows*1.0*3500/resizeImg.cols));
+	}
+	resizeImg(Range(0, blackEdgeRemovedPad), Range(0, resizeImg.cols)) = 255;
+	resizeImg(Range(resizeImg.rows - blackEdgeRemovedPad, resizeImg.rows), Range(0, resizeImg.cols)) = 255;
+	resizeImg(Range(0, resizeImg.rows), Range(0, blackEdgeRemovedPad)) = 255;
+	resizeImg(Range(0, resizeImg.rows), Range(resizeImg.cols - blackEdgeRemovedPad, resizeImg.cols)) = 255;
+	/// 3、倾斜矫正
+	double fAngle = ProjectionDeskew(resizeImg, 500, 0.1);
+	RotateImage(resizeImg, fAngle, 255, 1);
+	//m_resultTable = Mat::zeros(resizeImg.rows, resizeImg.cols, g_gray.type());
+}
+
+//连通域去噪的办法
+void wipeNoise(Mat& bw)
+{
+	vector<vector<Point>> outLabel;
+	findContours(bw.clone(), outLabel, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+	for (int i = 0; i < outLabel.size(); i++)
+	{
+		Rect rc = boundingRect(outLabel[i]);
+		if (rc.height <= 4 && rc.width <= 4)
+		{
+			bw(rc) = 0;
+		}
+	}
+}
+/// 多项式拟合
+void mypolyfit(const Mat& src_x, const Mat& src_y, Mat& dst, int order)
+{
+	CHECK_GT(src_x.rows, 0);
+	CHECK_GT(src_y.rows, 0);
+	CHECK_EQ(src_x.cols, 1);
+	CHECK_EQ(src_y.cols, 1);
+	CHECK_GE(order, 1);
+
+	Mat X = Mat::zeros(src_x.rows, order + 1,CV_32FC1), X_t;
+	Mat temp;
+	for(int i = 0; i <=order;i++)
+	{
+		temp = src_x.clone();
+		pow(temp, i, temp);
+		temp.col(0).copyTo(X.col(i));
+	}
+
+	transpose(X, X_t);
+	temp = X_t * X;
+	invert(temp, temp);
+	dst = temp * X_t * src_y;
+}
+
+void repairTableColLine(Mat &ColTable, int nTop, int nBottom, int nLeft, int nRight)
+{
+	CHECK_NE(ColTable.empty(), true);
+	CHECK_GE(nTop, 0);
+	CHECK_GE(nLeft, 0);
+	CHECK_LT(nBottom, ColTable.rows);
+	CHECK_LT(nRight, ColTable.cols);
+
+	Mat tmp = ColTable.clone();
+	ColTable.setTo(Scalar(0,0,0,0));
+
+	int nCandi = 1;
+	int nRadius = 7;
+
+	for (int i = nTop; i < nBottom; i++)
+	{
+		for (int j = nLeft; j < nRight; j++)
+		{
+			if (tmp.at<uchar>(i,j) == 255)
+			{
+				vector<int> vecLineX;
+				vector<int> vecLineY;
+				int nPreCol = j;
+				int nRowTmp = i;
+				int nSum = 0;
+				int nCnt = 0;
+
+				while (nRowTmp >= nTop)
+				{
+					nSum = 0;
+					nCnt = 0;
+					if (tmp.at<uchar>(nRowTmp, nPreCol) == 255)
+					{
+						vecLineX.push_back(nRowTmp);
+						vecLineY.push_back(nPreCol);
+						tmp.at<uchar>(nRowTmp, nPreCol) = nCandi;
+						nSum += nPreCol;
+						nCnt++;
+					}
+
+					for (int k = 1; k < nRadius; k++)
+					{
+						if (nPreCol - k >= 0 && tmp.at<uchar>(nRowTmp, nPreCol - k) == 255)
+						{
+							vecLineX.push_back(nRowTmp);
+							vecLineY.push_back(nPreCol - k);
+							tmp.at<uchar>(nRowTmp, nPreCol - k) = nCandi;
+							nSum += nPreCol - k;
+							nCnt++;
+						}
+
+						if (nPreCol + k < tmp.cols && tmp.at<uchar>(nRowTmp, nPreCol + k) == 255)
+						{
+							vecLineX.push_back(nRowTmp);
+							vecLineY.push_back(nPreCol + k);
+							tmp.at<uchar>(nRowTmp, nPreCol + k) = nCandi;
+							nSum += nPreCol + k;
+							nCnt++;
+						}
+					}
+
+					if (nCnt)
+					{
+						nPreCol = nSum * 1.0 / nCnt + 0.5;
+					}
+
+					nRowTmp--;
+				}
+
+				nRowTmp = i;
+				nPreCol = j;
+				while (nRowTmp < nBottom)
+				{
+					nSum = 0;
+					nCnt = 0;
+					if (tmp.at<uchar>(nRowTmp, nPreCol) == 255)
+					{
+						vecLineX.push_back(nRowTmp);
+						vecLineY.push_back(nPreCol);
+						tmp.at<uchar>(nRowTmp, nPreCol) = nCandi;
+						nSum += nPreCol;
+						nCnt++;
+					}
+
+					for (int k = 1; k < nRadius; k++)
+					{
+						if (nPreCol - k >= 0 && tmp.at<uchar>(nRowTmp, nPreCol - k) == 255)
+						{
+							vecLineX.push_back(nRowTmp);
+							vecLineY.push_back(nPreCol - k);
+							tmp.at<uchar>(nRowTmp, nPreCol - k) = nCandi;
+							nSum += nPreCol - k;
+							nCnt++;
+						}
+
+						if (nPreCol + k < tmp.cols && tmp.at<uchar>(nRowTmp, nPreCol + k) == 255)
+						{
+							vecLineX.push_back(nRowTmp);
+							vecLineY.push_back(nPreCol + k);
+							tmp.at<uchar>(nRowTmp, nPreCol + k) = nCandi;
+							nSum += nPreCol + k;
+							nCnt++;
+						}
+					}
+
+					if (nCnt)
+					{
+						nPreCol = nSum * 1.0 / nCnt + 0.5;
+					}
+
+					nRowTmp++;
+				}
+
+				sort(vecLineX.begin(), vecLineX.end());
+				if (abs(vecLineX[0] - vecLineX[vecLineX.size() - 1]) < (nBottom - nTop) * 0.2)
+				{
+					for (int k = 0; k < vecLineX.size(); k++)
+					{
+						tmp.at<uchar>(vecLineX[k], vecLineY[k]) = 0;
+					}
+
+					continue;
+				}
+
+				Mat srcX = Mat::zeros(vecLineX.size(), 1, CV_32FC1);
+				Mat srcY = Mat::zeros(vecLineY.size(), 1, CV_32FC1);
+				Mat dst;
+
+				for (int k = 0; k < vecLineX.size(); k++)
+				{
+					srcX.at<float>(k,0) = vecLineX[k];
+					srcY.at<float>(k,0) = vecLineY[k];
+				}
+
+				mypolyfit(srcX, srcY, dst, 1);
+				float k = dst.at<float>(1,0);
+				float b = dst.at<float>(0,0);
+
+				for (int row = nTop; row < nBottom; row++)
+				{
+					int nCol = k * row + b + 0.5;
+					if (nCol < nLeft || nCol > nRight || nCol < 2 || nCol >= tmp.cols - 2)
+					{
+						continue;
+					}
+
+					// 原来方式存在问题：因为列格线断裂导致格线修补后仍然不能连起来；现改为拟合曲线附近直接填充。20160727
+					tmp.at<uchar>(row, nCol - 3) = nCandi;
+					tmp.at<uchar>(row, nCol - 2) = nCandi;
+					tmp.at<uchar>(row, nCol - 1) = nCandi;
+					tmp.at<uchar>(row, nCol)	 = nCandi;
+					tmp.at<uchar>(row, nCol + 1) = nCandi;
+					tmp.at<uchar>(row, nCol + 2) = nCandi;
+					tmp.at<uchar>(row, nCol + 3) = nCandi;
+
+					ColTable.at<uchar>(row, nCol - 3) = nCandi;
+					ColTable.at<uchar>(row, nCol - 2) = nCandi;
+					ColTable.at<uchar>(row, nCol - 1) = nCandi;
+					ColTable.at<uchar>(row, nCol)	 = nCandi;
+					ColTable.at<uchar>(row, nCol + 1) = nCandi;
+					ColTable.at<uchar>(row, nCol + 2) = nCandi;
+					ColTable.at<uchar>(row, nCol + 3) = nCandi;
+				}
+			}
+		}
+	}
+	ColTable = ColTable * 255;
+	//tmp = tmp * 255;
+	//normalize(tmp, ColTable,0, 255, CV_MINMAX, CV_8UC1);
+}
+
+// 对行格线采用直线拟合的方式进行断裂修补
+void repairTableRowLine(Mat &RowTable, int nTop, int nBottom, int nLeft, int nRight)
+{
+	CHECK_NE(RowTable.empty(), true);
+	CHECK_GE(nTop, 0);
+	CHECK_GE(nLeft, 0);
+	CHECK_LT(nBottom, RowTable.rows);
+	CHECK_LT(nRight, RowTable.cols);
+
+	Mat tmp = RowTable.clone();
+	RowTable.setTo(Scalar(0,0,0,0));
+
+	int nCandi = 1;
+	int nRadius = 7;
+
+	for (int i = nTop; i < nBottom; i++)
+	{
+		for (int j = nLeft; j < nRight; j++)
+		{
+			if (tmp.at<uchar>(i,j) == 255)
+			{
+				vector<int> vecLineX;
+				vector<int> vecLineY;
+
+				int nColTmp = j;
+				int nPreRow = i;
+				int nSum = 0;
+				int nCnt = 0;
+
+				while (nColTmp >= nLeft)
+				{
+					nSum = 0;
+					nCnt = 0;
+					if (tmp.at<uchar>(nPreRow, nColTmp) == 255)
+					{
+						vecLineX.push_back(nPreRow);
+						vecLineY.push_back(nColTmp);
+						tmp.at<uchar>(nPreRow, nColTmp) = nCandi;
+						nSum += nPreRow;
+						nCnt++;
+					}
+
+					for (int k = 1; k < nRadius; k++)
+					{
+						if (nPreRow - k >= 0 && tmp.at<uchar>(nPreRow - k, nColTmp) == 255)
+						{
+							vecLineX.push_back(nPreRow - k);
+							vecLineY.push_back(nColTmp);
+							tmp.at<uchar>(nPreRow - k, nColTmp) = nCandi;
+							nSum += nPreRow - k;
+							nCnt++;
+						}
+
+						if (nPreRow + k < tmp.rows && tmp.at<uchar>(nPreRow + k, nColTmp) == 255)
+						{
+							vecLineX.push_back(nPreRow + k);
+							vecLineY.push_back(nColTmp);
+							tmp.at<uchar>(nPreRow + k, nColTmp) = nCandi;
+							nSum += nPreRow + k;
+							nCnt++;
+						}
+					}
+
+					if (nCnt != 0)
+					{
+						nPreRow = nSum * 1.0 / nCnt + 0.5;
+					}
+
+					nColTmp--;
+				}
+
+				nColTmp = j;
+				nPreRow = i;
+
+				while (nColTmp < nRight)
+				{
+					nSum = 0;
+					nCnt = 0;
+					if (tmp.at<uchar>(nPreRow, nColTmp) == 255)
+					{
+						vecLineX.push_back(nPreRow);
+						vecLineY.push_back(nColTmp);
+						tmp.at<uchar>(nPreRow, nColTmp) = nCandi;
+						nSum += nPreRow;
+						nCnt++;
+					}
+
+					for (int k = 1; k < nRadius; k++)
+					{
+						if (nPreRow - k >= 0 && tmp.at<uchar>(nPreRow - k, nColTmp) == 255)
+						{
+							vecLineX.push_back(nPreRow - k);
+							vecLineY.push_back(nColTmp);
+							tmp.at<uchar>(nPreRow - k, nColTmp) = nCandi;
+							nSum += nPreRow - k;
+							nCnt++;
+						}
+
+						if (nPreRow + k < tmp.rows && tmp.at<uchar>(nPreRow + k, nColTmp) == 255)
+						{
+							vecLineX.push_back(nPreRow + k);
+							vecLineY.push_back(nColTmp);
+							tmp.at<uchar>(nPreRow + k, nColTmp) = nCandi;
+							nSum += nPreRow + k;
+							nCnt++;
+						}
+					}
+
+					if (nCnt)
+					{
+						nPreRow = nSum * 1.0 / nCnt + 0.5;
+					}
+
+					nColTmp++;
+				}
+
+				if (vecLineX.size() < (nRight - nLeft) * 0.6)
+				{
+					for (int k = 0; k < vecLineX.size(); k++)
+					{
+						tmp.at<uchar>(vecLineX[k], vecLineY[k]) = 0;
+					}
+					continue;
+				}
+
+				Mat srcX = Mat::zeros(vecLineX.size(), 1, CV_32FC1);
+				Mat srcY = Mat::zeros(vecLineY.size(), 1, CV_32FC1);
+				Mat dst;
+
+				for (int k = 0; k < vecLineX.size(); k++)
+				{
+					srcX.at<float>(k,0) = vecLineX[k];
+					srcY.at<float>(k,0) = vecLineY[k];
+				}
+
+				mypolyfit(srcY, srcX, dst, 1);
+				float k = dst.at<float>(1,0);
+				float b = dst.at<float>(0,0);
+
+				for (int col = nLeft; col < nRight; col++)
+				{
+					int nRowTmp = k * col + b;
+					if (nRowTmp < 5 || nRowTmp > tmp.rows - 5 || nRowTmp < 1 || nRowTmp >= tmp.rows - 1)
+					{
+						continue;
+					}
+					tmp.at<uchar>(nRowTmp-2, col) = nCandi;
+					tmp.at<uchar>(nRowTmp-1, col) = nCandi;
+					tmp.at<uchar>(nRowTmp,   col) = nCandi;
+					tmp.at<uchar>(nRowTmp+1, col) = nCandi;
+					tmp.at<uchar>(nRowTmp+2, col) = nCandi;
+
+					RowTable.at<uchar>(nRowTmp-2, col) = nCandi;
+					RowTable.at<uchar>(nRowTmp-1, col) = nCandi;
+					RowTable.at<uchar>(nRowTmp,   col) = nCandi;
+					RowTable.at<uchar>(nRowTmp+1, col) = nCandi;
+					RowTable.at<uchar>(nRowTmp+2, col) = nCandi;
+				}
+			}
+		}
+	}
+
+	RowTable = RowTable * 255;
+	// 	tmp = tmp * 255;
+	// 	normalize(tmp, RowTable,0, 255, CV_MINMAX, CV_8UC1);
+}
+
+/// 按百分比提取行直方图
+void getRowHistIdx(Mat rowGray, vector<double>& vfRowHist)
+{
+	CHECK_NE(rowGray.empty(), true);
+
+	if (rowGray.empty())
+	{
+		return;
+	}
+
+	vfRowHist.clear();
+
+	for (int i = 0; i < rowGray.rows; i++)
+	{
+		vfRowHist.push_back(sum(rowGray.row(i)).val[0]);
+	}
+
+	int nIdx = -1;
+	double fRowMax = getMax<double>(vfRowHist, nIdx);
+
+	for (int i = 0; i < vfRowHist.size(); i++)
+	{
+		if (vfRowHist[i] > fRowMax * 0.1)
+		{
+			vfRowHist[i] = 1;
+		}
+		else
+		{
+			vfRowHist[i] = 0;
+		}
+	}
+}
+
+/// 按百分比提取列直方图
+void getColHistIdx(Mat colGray, vector<double>& vfColHist)
+{
+	CHECK_NE(colGray.empty(), true);
+
+	if (colGray.empty())
+	{
+		return;
+	}
+
+	vfColHist.clear();
+
+	for (int i = 0; i < colGray.cols; i++)
+	{
+		vfColHist.push_back(sum(colGray.col(i)).val[0]);
+	}
+
+	int nIdx = -1;
+	double fColMax = getMax<double>(vfColHist, nIdx);
+
+	for (int i = 0; i < vfColHist.size(); i++)
+	{
+		if (vfColHist[i] > fColMax * 0.1)
+		{
+			vfColHist[i] = 1.0;
+		}
+		else
+		{
+			vfColHist[i] = 0;
+		}
+	}
+}
+void calcSegRectCol(vector<double> vfHist, vector<Rect>& vnSeg)
+{
+	CHECK_GT(vfHist.size(), 0);
+
+	int startIdx = 0;
+	int endIdx = 0;
+	double Th = 0.5;
+	bool flag = false;  //标记是否有起点了
+
+	int nCnt = 0;
+	for (int i = 0; i < vfHist.size(); i++)
+	{
+		if (false == flag)
+		{
+			if (vfHist[i] > Th)
+			{
+				startIdx = i;
+				flag = true;
+			}
+		}
+		else
+		{
+			if (vfHist[i] <= Th)
+			{
+				endIdx = i - 1;
+				flag = false;
+
+				vnSeg.push_back(Rect(startIdx, 0, endIdx - startIdx, 0));
+				nCnt++;
+			}
+		}
+	}
+}
+
+void calcSegLine(vector<double> vfHist, vector<int>& vnSeg)
+{
+	CHECK_GT(vfHist.size(), 0);
+
+	int startIdx = 0;
+	int endIdx = 0;
+	double Th = 0.5;
+	bool flag = false;  //标记是否有起点了
+
+	for (int i = 0; i < vfHist.size(); i++)
+	{
+		if (false == flag)
+		{
+			if (vfHist[i] > Th)
+			{
+				startIdx = i;
+				flag = true;
+			}
+		}
+		else
+		{
+			if (vfHist[i] <= Th)
+			{
+				endIdx = i-1;
+				flag = false;
+
+				vnSeg.push_back((endIdx + startIdx) / 2);
+			}
+		}
+	}
+}
+
+void calcSegRectRow(vector<double> vfHist, vector<Rect>& vnSeg)
+{
+	CHECK_GT(vfHist.size(), 0);
+
+	int startIdx = 0;
+	int endIdx = 0;
+	double Th = 0.5;
+	bool flag = false;  //标记是否有起点了
+
+	for (int i = 0; i < vfHist.size(); i++)
+	{
+		if (false == flag)
+		{
+			if (vfHist[i] > Th)
+			{
+				startIdx = i;
+				flag = true;
+			}
+		}
+		else
+		{
+			if (vfHist[i] <= Th && vfHist[i - 1] > Th)
+			{
+				endIdx = i-1;				
+				if ((endIdx - startIdx > 20))
+				{
+					flag = false;
+					vnSeg.push_back(Rect(0, startIdx, 0, endIdx - startIdx));
+				}
+
+			}
+		}
+	}
+}
+
+int editDistance(string str1, string str2)
+{	
+	int max1 = str1.size();
+	int max2 = str2.size();
+
+	// malloc and init.
+	int **ptr = new int *[max1 + 1];
+
+	for (int i = 0; i < max1 + 1; i++)
+	{
+		ptr[i] = new int[max2 + 1];
+	}
+
+	for (int i = 0; i < max1 + 1; i++)
+	{
+		ptr[i][0] = i;
+	}
+
+	for (int i = 0; i < max2 + 1; i++)
+	{
+		ptr[0][i] = i;
+	}
+
+	// core of the edit distance.
+	for (int i = 1; i < max1 + 1; i++)
+	{
+		for (int j = 1; j < max2 + 1; j++)
+		{
+			int cost = str1[i - 1] == str2[j - 1] ? 0 : 1;
+			int deletion = ptr[i - 1][j] + 1;
+			int insertion = ptr[i][j - 1] + 1;
+			int substitution = ptr[i - 1][j - 1] + cost;
+
+			ptr[i][j] = IVMIN(deletion, IVMIN(insertion, substitution));
+		}
+	}
+
+
+	int nDist = ptr[max1][max2];
+
+	// free and return.
+	for (int i = 0; i < max1 + 1; i++)
+	{
+		delete[] ptr[i];
+		ptr[i] = NULL;
+	}
+
+	delete[] ptr;
+	ptr = NULL;
+
+	return nDist;
+}
+
+string getPreFieldPrintFrmDic(string strRef, tstring refFieldStr,PrePrintInfos prePrintInfos, int nRefDist = 2)
+{
+	int nDist = INT_MAX;
+	int nContIdx = -1;
+	int nFieldIdx = -1;
+
+	/// Check Field
+	for (int i = 0; i < prePrintInfos.size(); i++)
+	{
+		int nTmp = editDistance(classToStr(refFieldStr), classToStr(prePrintInfos[i].tstrFieldName));
+		if (nTmp < nDist)
+		{
+			nDist = nTmp;
+			nFieldIdx = i;
+		}
+	}
+
+	if (nFieldIdx == -1)
+	{
+		return strRef;
+	}
+
+	/// Check Content
+	nDist = INT_MAX;
+	for (int i = 0; i < prePrintInfos[nFieldIdx].Contents.size(); i++)
+	{
+		int nTmp = editDistance(strRef, classToStr(prePrintInfos[nFieldIdx].Contents[i]));
+		if (nTmp < nDist)
+		{
+			nDist = nTmp;
+			nContIdx = i;
+		}
+	}
+
+	if (nContIdx != -1 && nDist <= nRefDist)
+	{
+		return classToStr(prePrintInfos[nFieldIdx].Contents[nContIdx]);
+	}
+	else
+	{
+		return strRef;
+	}
+
+}
+///通过标题筛选出对应输入版式（达到盲识别判断版式的目的，班子考核表格式相同，不同考核类别仅部分区域文字有差别，暂按照班子考核大类确定输入版式）
+bool classifyByTitle(long recoHandle,Mat bw,Rect titleROI,PrePrintInfos pre,vector<inModel> inModels,inModel& certainInModel,inEVAFormType& inType)
+{
+	if (titleROI.height <= 0 || titleROI.width <= 0)
+	{
+		return false;
+	}
+	Mat titleImage = bw(titleROI);
+	string resLine = string();
+	int conf = 0;
+	//erode(titleImage, titleImage, Mat::ones(3,3,CV_8UC1));
+	AllEngine_Classify(recoHandle, CHAR_LINE, titleImage, resLine, conf);
+	/*if (resLine.size() < 10)
+	{
+		return false;
+	}*/
+	string str = getPreFieldPrintFrmDic(resLine, classToWStr("测评表输入类型"), pre, resLine.size());
+	if (str=="会管单位会管干部年度考核测评表")
+	{
+		inType=IN_EVA_HGGB;
+	} 
+	else if (str=="会管单位领导班子年度考核测评表")
+	{
+		inType=IN_EVA_HGBZ;
+	}
+	else if(str=="新提拔干部民主评议表")
+	{
+		inType=IN_EVA_XTB;
+	}
+	else if(str=="选人用人工作民主评议表")
+	{
+		inType=IN_EVA_XRYR;
+	}
+	else
+	{///针对笔画过粗进行腐蚀处理二次识别
+		resLine.clear();
+		str.clear();
+		erode(titleImage, titleImage, Mat::ones(3,3,CV_8UC1));
+		AllEngine_Classify(recoHandle, CHAR_LINE, titleImage, resLine, conf);
+		if (resLine.size() < 10)
+		{
+			return false;
+		}
+        str = getPreFieldPrintFrmDic(resLine, classToWStr("测评表输入类型"), pre, resLine.size());
+		if (str=="会管单位会管干部年度考核测评表")
+		{
+			inType=IN_EVA_HGGB;
+		} 
+		else if (str=="会管单位领导班子年度考核测评表")
+		{
+			inType=IN_EVA_HGBZ;
+		}
+		else if(str=="新提拔干部民主评议表")
+		{
+			inType=IN_EVA_XTB;
+		}
+		else if(str=="选人用人工作民主评议表")
+		{
+			inType=IN_EVA_XRYR;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	/// 从候选输入模板中选出与title最相匹配者
+	int nRefIndex = -1;
+	for (int i = 0; i < inModels.size(); i++)
+	{
+		if (classToWStr(str) == inModels[i].inPutModelType)
+		{
+			nRefIndex = i;
+			mIvLog("LOG_COLOR_R") << "confirm the input type" << str;
+			break;
+		}
+	}
+	if (nRefIndex == -1)
+	{
+		return false;
+	}
+	/// 查找到了最匹配者
+	certainInModel=inModels[nRefIndex];
+	return true;
+}
+
+/// <边界填充，防止扫描黑边导致分类错误>
+void BlackMarginRemove(Mat &grayImage, int iTh, int iWhiteValue) {
+	/// <上下填充>
+	for(int j = 0; j < grayImage.cols; j++) {
+		for (int i = 0; i < grayImage.rows; i++) {
+			uchar cValue = grayImage.at<uchar>(i, j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+
+		for (int i = grayImage.rows - 1; i >= 0; i--) {
+			uchar cValue = grayImage.at<uchar>(i,j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+	}
+
+	/// <左右填充>
+	for (int i = 0; i < grayImage.rows; i++) {
+		for (int j = 0; j < grayImage.cols; j++ ) {
+			uchar cValue = grayImage.at<uchar>(i,j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+
+		for (int j = grayImage.cols - 1; j >= 0; j-- ) {
+			uchar cValue = grayImage.at<uchar>(i,j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+	}
+	return;
+}
+
+void removeDisturbLines(Mat& bw,int k)
+{
+	vector<vector<Point> >contours;
+	Mat tmpBw=bw.clone();
+	Mat element=getStructuringElement(MORPH_RECT,Size(4,4));
+    morphologyEx(tmpBw,tmpBw,MORPH_CLOSE,element);
+	findContours(tmpBw.clone(),contours,CV_RETR_CCOMP,CV_CHAIN_APPROX_NONE);
+	for (int i=0;i<contours.size();i++)
+	{
+		Rect tRc=boundingRect(contours[i]);
+		if (tRc.width<=k||tRc.height<=k)
+		{
+			bw(tRc)=0;
+		}
+	}
+}
+//版面分析模块（亦可通过标题确定输入模板）
+/*
+说明：输入全局句柄和原始图像，得到全局的二值图（g_bwImg），归一化图（g_resizeImg），重构格线图（g_resultTable）,灰度去格线图（g_grayWithoutLines），二值去格线图（g_bwWithoutLines），并匹配上输入模板（m_inModel）、输入类型（inType）
+*/
+int eva_form_recog_layoutanalysis(long handle,Mat src,Mat& g_bwImg,Mat& g_resizeImg,Mat& g_resultTable,Mat& g_grayWithoutLines,Mat&g_bwWithoutLines,inModel& m_inModel,inEVAFormType& inType)
+{
+	if (handle<=0)
+	{
+		return EVA_RET_ERR_HANDLE;
+	}
+	eva_form_recog_allHandle* mod_recoEngine=(eva_form_recog_allHandle*)handle;
+	allPreInfos* preInfo=(allPreInfos*)(mod_recoEngine->modelHandle);
+	vector<inModel> allInModel=preInfo->m_inPutModel;
+	Mat resizeGrayImg;
+	int nFillEdge = 0.01*src.rows;
+	bool bRet = getStandardImage(src,resizeGrayImg,nFillEdge);
+	if (!bRet)
+	{
+		return EVA_RET_ERR_IMG_MAT;
+	}
+	LOG(INFO) << "PreProcessing (DeColor, DeSize, DeSkew) Over!";
+
+	/// 图像预处理，边界填充
+	/*int nFillEdge = 0.05*resizeGrayImg.cols;
+	resizeGrayImg(Range(0, nFillEdge), Range(0, resizeGrayImg.cols)) = 255;
+	resizeGrayImg(Range(resizeGrayImg.rows - nFillEdge, resizeGrayImg.rows), Range(0, resizeGrayImg.cols)) = 255;
+	resizeGrayImg(Range(0, resizeGrayImg.rows), Range(0, nFillEdge)) = 255;
+	resizeGrayImg(Range(0, resizeGrayImg.rows), Range(resizeGrayImg.cols - nFillEdge, resizeGrayImg.cols)) = 255;*/
+
+	//BlackMarginRemove(resizeGrayImg,100,255);
+
+	///二值化
+	double thres = threshold(resizeGrayImg, g_bwImg, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+	threshold(resizeGrayImg, g_bwImg, thres/* + 50*/, 255, CV_THRESH_BINARY_INV);
+	//adaptiveThreshold(resizeGrayImg, g_bwImg, 255, CV_ADAPTIVE_THRESH_MEAN_C,CV_THRESH_BINARY, 15, 10);
+	//去噪点(中值滤波的方法)
+	//medianBlur(g_bwImg,g_bwImg,5);
+	//去噪点（连通域的方法）
+	wipeNoise(g_bwImg);
+	
+	/// 4.3 格线定位
+	/// 4.3.1 框定表格区域
+	vector<vector<Point>> contours;
+	findContours(g_bwImg.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+	vector<Rect> vRect;
+	for (int i = 0; i < contours.size(); i++)
+	{
+		vRect.push_back(boundingRect(contours[i]));
+	}
+
+	sort(vRect.begin(), vRect.end(), sortRectDscendArea);
+
+	/// 限定有效区域
+	Rect rectROI = vRect[0];
+	for (int reg = 1; reg < 3; reg++)
+	{
+		Rect tmpROI = vRect[reg];
+		if (tmpROI.width < g_bwImg.cols * 0.6/* || tmpROI.height < m_bwImg.rows * 0.1*/)
+		{
+			continue;
+		}
+		int nStartX = IVMIN(tmpROI.x, rectROI.x);
+		int nStartY = IVMIN(tmpROI.y, rectROI.y);
+		int nEndX   = IVMAX(tmpROI.br().x, rectROI.br().x);
+		int nEndY   = IVMAX(tmpROI.br().y, rectROI.br().y);
+		rectROI = Rect(nStartX, nStartY, nEndX - nStartX, nEndY- nStartY);
+	}
+
+	/// 先定位Table，后定位Field。防止因为Field中勾号过长与Table相关而产生的定位错误
+	//----------------------------------------------------------------------------------//
+	vector<int> vnColSeg, vnRowSeg;
+	{
+#ifdef LINEDETECTREMOVE
+		icvLinePara para;
+		icvGetLineDetectionPara(para);
+		para.fMaxSkewAngle   = 15;	/// <直线最大倾斜角>
+		para.nVertRunMinLen  = 5;	/// <垂直游程最小长度>
+		para.nVertLineMinLen = 80;	/// <垂直直线最小长度>
+		para.nHoriLineMinLen = 80;	/// <水平直线最小长度>
+		icvSetLineDetectionPara(para);
+
+		/// <经直线检测移除后输出两个Mat：直线掩模二值图+去线二值图>
+		Mat lineMaskImg, removeImg;
+		vector<vector<float>> arrHoriLineInfo, arrVertLineInfo;
+		icvLineDetectionAndRemove_curveLine_lineInfo(g_bwImg, arrHoriLineInfo, arrVertLineInfo, lineMaskImg, removeImg, true);
+#else
+		/// 4.3.2 采用形态学方法提取格线			
+		Mat tmpG = g_bwImg(Range(rectROI.y, rectROI.y + rectROI.height), Range(rectROI.x, rectROI.x + rectROI.width)).clone(), colGray, rowGray, element;
+		copyMakeBorder(tmpG, tmpG, rectROI.y, g_bwImg.rows - rectROI.y - rectROI.height, rectROI.x, g_bwImg.cols - rectROI.x - rectROI.width, BORDER_CONSTANT, Scalar(0,0,0,0));
+
+		int radius = 71;
+		element = getStructuringElement(MORPH_RECT, Size(1, radius));
+		morphologyEx(tmpG, colGray, MORPH_OPEN, element);			
+		element = getStructuringElement(MORPH_RECT, Size(radius, 1));
+		morphologyEx(tmpG, rowGray, MORPH_OPEN, element);
+		dilate(colGray, colGray, Mat::ones(9, 9, CV_8UC1));		
+		dilate(rowGray, rowGray, Mat::ones(9, 9, CV_8UC1));
+
+		/// 直方图定位格线
+		vector<double> vfColHist, vfRowHist;
+		//vector<int> vnColSeg, vnRowSeg;
+
+		getRowHistIdx(rowGray, vfRowHist);
+		calcSegLine(vfRowHist, vnRowSeg);
+		getColHistIdx(colGray, vfColHist);	
+		calcSegLine(vfColHist, vnColSeg);
+		//为避免最上框格线与field部分域重合的现象，在这里根据行格线切分的结果重新定义rectROI上边界20180206王博
+		rectROI.y=vnRowSeg[0];
+		rectROI.height=rectROI.br().y-vnRowSeg[0];
+		//rectROI.br().y
+		repairTableColLine(colGray, rectROI.y, rectROI.y + rectROI.height, rectROI.x, rectROI.x + rectROI.width);
+		repairTableRowLine(rowGray, rectROI.y, rectROI.y + rectROI.height, rectROI.x, rectROI.x + rectROI.width);
+
+		{
+			Mat table = (colGray | rowGray) & g_bwImg;
+			int nNonZero = 0;
+			float fSumMean = 0;
+			float fSumStd = 0;
+			float fStd = 0;
+			for (int i = 0; i < table.rows; i++)
+			{
+				for (int j = 0; j < table.cols; j++)
+				{
+					if (table.at<uchar>(i,j))
+					{
+						fSumMean  += resizeGrayImg.at<uchar>(i,j);						
+						nNonZero++;
+					}
+				}
+			}
+
+			fSumMean  /= nNonZero;
+			for (int i = 0; i < table.rows; i++)
+			{
+				for (int j = 0; j < table.cols; j++)
+				{
+					if (table.at<uchar>(i,j))
+					{
+						fSumStd  += (resizeGrayImg.at<uchar>(i,j) - fSumMean) * (resizeGrayImg.at<uchar>(i,j) - fSumMean);
+					}
+				}
+			}
+
+			fSumStd /= nNonZero;
+			fStd = sqrtf(fSumStd);
+
+			dilate(table, table, Mat::ones(9,9,CV_8UC1));
+			for (int i = 0; i < table.rows; i++)
+			{
+				for (int j = 0; j < table.cols; j++)
+				{
+					if ((resizeGrayImg.at<uchar>(i,j) < fSumMean + 3 * fStd) && table.at<uchar>(i,j))
+					{						
+						table.at<uchar>(i,j) = 255;
+					}
+					else
+					{
+						table.at<uchar>(i,j) = 0;
+					}
+				}
+			}
+			g_resultTable = table;
+		}
+		dilate(colGray, colGray, Mat::ones(9, 9, CV_8UC1));		
+		dilate(rowGray, rowGray, Mat::ones(9, 9, CV_8UC1));
+
+		/// 4.3.4 重建表格格线
+		g_resultTable = g_resultTable & (colGray | rowGray);	
+
+#endif
+	
+		///重建格线拓宽处理
+		Mat kernel=getStructuringElement(MORPH_RECT,Size(3,2));
+		morphologyEx(g_resultTable,g_resultTable,MORPH_DILATE,kernel);
+		g_resizeImg=resizeGrayImg;
+		g_grayWithoutLines=g_resizeImg.clone();
+		g_bwWithoutLines=g_bwImg.clone();
+		//为防止部分fields可能被顶格线干扰，在这里对另一个灰度图进行去格线处理，原灰度图不变,原二值图保留，添加去格线的二值图
+		for (int i=0;i<g_resultTable.rows;i++)
+		{
+			for (int j=0;j<g_resultTable.cols;j++)
+			{
+				if (g_resultTable.at<uchar>(i,j))
+				{
+					g_grayWithoutLines.at<uchar>(i,j)=255;
+					g_bwWithoutLines.at<uchar>(i,j)=0;
+				}
+			}
+		}
+	}
+
+	///定位title并识别、分类
+	Mat FieldImage = g_bwWithoutLines.clone(), tmpField;
+	FieldImage(rectROI) = 0;
+	FieldImage(Range(FieldImage.rows/2, FieldImage.rows), Range(0, FieldImage.cols)) = 0;
+	///针对现场客户反馈样本，field区域因为打印机质量问题出现细竖线干扰，进行剔除20180322
+	removeDisturbLines(FieldImage,5);
+	medianBlur(FieldImage, FieldImage, 3);
+	dilate(FieldImage, tmpField, Mat::ones(3, 21, CV_8UC1));
+
+	vector<double> vfRowHist;
+	vector<Rect> vnRowSegRect;				
+
+	getRowHistIdx(tmpField, vfRowHist);
+	calcSegRectRow(vfRowHist, vnRowSegRect);
+	Rect titleROI = Rect(nFillEdge, vnRowSegRect[0].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[0].height);
+	//preInfo->m_prePrintInfos;
+	//通过标题识别确定唯一对应输入版式
+	bool Ret=classifyByTitle(mod_recoEngine->recogHandle,g_bwImg,titleROI,preInfo->m_prePrintInfos,allInModel,m_inModel,inType);
+	if(!Ret)
+	{
+		return EVA_RET_ERR_CLASSIFY_IN;
+	}
+	///定位fieles
+	if (vnRowSegRect.size() < 3)
+	{
+		CHECK_EQ(vnRowSegRect.size(), 3);
+		return EVA_RET_ERR_CLASSIFY_IN;
+	}
+	//此处添加输出模板匹配的模块，主要是根据上述判断出的输入类型对特定field进行定位（过于依赖上一步骤的输入模板的类型，通用性不是很好）
+	//if(inType==IN_EVA_HGBZ||inType==IN_EVA_HGGB)
+	//{
+	//	m_inModel.tFields[0].tFieldRect=Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 2].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 2].height);//会管类副标题,判断填表人职务层次
+	//	Rect tmpRect;
+	//	tmpRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 1].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 1].height);
+	//	tmpField.setTo(0);
+	//	FieldImage(tmpRect).copyTo(tmpField(tmpRect));
+	//	dilate(tmpField, tmpField, Mat::ones(tmpRect.height, tmpRect.height * 1.5, CV_8UC1));
+	//	vector<double> vfColHist;
+	//	vector<Rect> vnColSegRect;	
+	//	getColHistIdx(tmpField, vfColHist);
+	//	calcSegRectCol(vfColHist, vnColSegRect);
+	//	if (vnColSegRect.size() < m_inModel.tFields.size()-1)
+	//	{
+	//		CHECK_LT(vnColSegRect.size(), m_inModel.tFields.size());
+	//		return false;
+	//	}
+	//	for (int i = 1; i < m_inModel.tFields.size(); i++) 
+	//	{
+	//		int idx = m_inModel.tFields[i].iPosition;
+	//		m_inModel.tFields[i].tFieldRect = Rect(vnColSegRect[idx - 1].x, tmpRect.y, vnColSegRect[idx - 1].width, tmpRect.height);
+	//	}
+	//}
+	//else
+	//{
+	//	m_inModel.tFields[0].tFieldRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 2].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 2].height);
+	//	m_inModel.tFields[1].tFieldRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 1].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 1].height);
+	//}
+
+	//不依赖输入模板类型的通用化field定位
+	vector<vector<Field> > fieldArr; //模拟行列形式的fields
+	vector<Field> fieldRow;
+	for (int i=0;i<m_inModel.tFields.size();i++)
+	{
+		if (i==0)
+		{
+			fieldRow.push_back(m_inModel.tFields[i]);
+			continue;
+		}
+		if (m_inModel.tFields[i].iRowNum==m_inModel.tFields[i-1].iRowNum)
+		{
+			fieldRow.push_back(m_inModel.tFields[i]);
+			if (i==m_inModel.tFields.size()-1)
+			{
+				fieldArr.push_back(fieldRow);
+			}
+		}
+		else
+		{
+			fieldArr.push_back(fieldRow);
+			fieldRow.clear();
+			fieldRow.push_back(m_inModel.tFields[i]);
+			if (i==m_inModel.tFields.size()-1)
+			{
+				fieldArr.push_back(fieldRow);
+			}
+		}
+	}
+	/*if (fieldArr.size()!=vnRowSegRect.size()-1)
+	{
+	return EVA_RET_ERR_NO_MATCH;
+	}*/
+	for (int m=fieldArr.size()-1,n=0;m>=0,n<=fieldArr.size()-1;m--,n++)//m为field阵列从下到上的行索引，n为行切分结果从下到上的索引
+	{
+		Rect tmpRect;
+		tmpRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size()-n-1].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size()-n-1].height);
+		tmpField.setTo(0);
+		FieldImage(tmpRect).copyTo(tmpField(tmpRect));
+		dilate(tmpField, tmpField, Mat::ones(tmpRect.height, tmpRect.height * 1.5, CV_8UC1));
+		vector<double> vfColHist;
+		vector<Rect> vnColSegRect;	
+		getColHistIdx(tmpField, vfColHist);
+		calcSegRectCol(vfColHist, vnColSegRect);
+		///特殊格式field切分需要合并
+		if (inType==IN_EVA_XRYR||inType==IN_EVA_XTB)
+		{
+			if(vnColSegRect.size()>fieldArr[m][0].iFieldNumPerRow)
+			{
+				int minX=tmpField.cols,minY=tmpField.rows,brX=0,brY=0;
+				for (int i=0;i<vnColSegRect.size();i++)
+				{
+					if(vnColSegRect[i].x<minX)
+					{
+						minX=vnColSegRect[i].x;
+					}
+					if (vnColSegRect[i].y<minY)
+					{
+						minY=vnColSegRect[i].y;
+					}
+					if (vnColSegRect[i].br().x>brX)
+					{
+						brX=vnColSegRect[i].br().x;
+					}
+					if (vnColSegRect[i].br().y>brY)
+					{
+						brY=vnColSegRect[i].br().y;
+					}
+				}
+				vnColSegRect.clear();
+				vnColSegRect.push_back(Rect(minX,minY,brX-minX,brY-minY));
+			}
+		}
+		if (vnColSegRect.size()>=fieldArr[m].size())
+		{
+			while (vnColSegRect.size() > fieldArr[m].size())
+			{
+				//Rect tmpRc=vnColSegRect[vnColSegRect.size()-1];
+				vnColSegRect[vnColSegRect.size()-2].width+=vnColSegRect[vnColSegRect.size()-1].width;
+				vnColSegRect.pop_back();
+			}
+		}
+		else
+		{
+			return EVA_RET_ERR_NO_MATCH;
+		}
+		for (int i = 0; i < fieldArr[m].size(); i++) 
+		{
+			//int idx = m_inModel.tFields[i].iPosition;
+			fieldArr[m][i].tFieldRect= Rect(vnColSegRect[i].x, tmpRect.y, vnColSegRect[i].width, tmpRect.height);
+		}
+	}
+
+	//还原至模型文件
+	m_inModel.tFields.clear();
+	for(int a=0;a<fieldArr.size();a++)
+	{
+		for(int b=0;b<fieldArr[a].size();b++)
+		{
+			m_inModel.tFields.push_back(fieldArr[a][b]);
+		}
+	}
+	//if (m_inModel.tFields[0].iRowNum == 1)
+	//{
+	//	Rect tmpRect;
+	//	tmpRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 1].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 1].height);
+	//	tmpField.setTo(0);
+	//	FieldImage(tmpRect).copyTo(tmpField(tmpRect));
+	//	dilate(tmpField, tmpField, Mat::ones(tmpRect.height, tmpRect.height * 1.5, CV_8UC1));
+
+	//	vector<double> vfColHist;
+	//	vector<Rect> vnColSegRect;	
+	//	getColHistIdx(tmpField, vfColHist);
+	//	calcSegRectCol(vfColHist, vnColSegRect);
+
+	//	if (vnColSegRect.size() < m_inModel.tFields.size())
+	//	{
+	//		CHECK_LT(vnColSegRect.size(), m_inModel.tFields.size());
+	//		return false;
+	//	}
+
+	//	for (int i = 0; i < m_inModel.tFields.size(); i++) 
+	//	{
+	//		int idx = m_inModel.tFields[i].iPosition;
+	//		m_inModel.tFields[i].tFieldRect = Rect(vnColSegRect[idx - 1].x, tmpRect.y, vnColSegRect[idx - 1].width, tmpRect.height);
+	//	}
+	//	//m_inModel.tFields[0].tFieldRect = Rect(vnColSegRect[0].x, tmpRect.y, vnColSegRect[0].width, tmpRect.height);
+	//	//m_inModel.tFields[1].tFieldRect = Rect(vnColSegRect[1].x, tmpRect.y, vnColSegRect[1].width, tmpRect.height);
+	//}
+	//else
+	//{
+	//	m_inModel.tFields[0].tFieldRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 2].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 2].height);
+	//	m_inModel.tFields[1].tFieldRect = Rect(nFillEdge, vnRowSegRect[vnRowSegRect.size() - 1].y, tmpField.cols - nFillEdge * 2, vnRowSegRect[vnRowSegRect.size() - 1].height);
+	//}
+	///确定输入版式后根据模板和当前样本直线信息确定各个单元格rect信息
+	for (int k = 0; k < m_inModel.tTable.size(); k++)
+	{
+		if (m_inModel.tTable[k].iCol <= 0 
+			|| m_inModel.tTable[k].iRow <= 0
+			|| m_inModel.tTable[k].iColEnd >= vnColSeg.size()
+			|| m_inModel.tTable[k].iRowEnd >= vnRowSeg.size())
+		{
+			continue;
+		}
+
+		Rect roi;					
+		roi.x = vnColSeg[m_inModel.tTable[k].iCol - 1];
+		roi.y = vnRowSeg[m_inModel.tTable[k].iRow - 1];
+		roi.width = vnColSeg[m_inModel.tTable[k].iColEnd] - vnColSeg[m_inModel.tTable[k].iCol - 1];
+		roi.height = vnRowSeg[m_inModel.tTable[k].iRowEnd] - vnRowSeg[m_inModel.tTable[k].iRow - 1];
+		m_inModel.tTable[k].tCellRect = roi;
+	}
+	if (abs(rectROI.y = vnRowSeg[0]) > 10)
+	{
+		rectROI.height = rectROI.br().y - vnRowSeg[0];
+		rectROI.y = vnRowSeg[0];
+	}		
+	return EVA_RET_OK;
+}
+
+// const tstring Field_True_Tick	= L"*";			/// 域 识别输出-"√"
+// const tstring Field_False_Tick	= L"#";			/// 域 识别输出-""
+// const tstring Field_False_Sig	= L"口□";		/// 域 识别结果-假
+// const tstring Field_True_Sig	= L"√vⅴYy";		/// 域 识别结果-真
+bool checkTrueTick(vector<string>& vStrResult, Field refField, PrePrintInfos prePrintInfos)
+{
+	if (vStrResult.size() != 3)
+	{
+		LOG(ERROR) << "Data not Match Function.";
+		return false;
+	}
+
+	vector<string> vRefResult;
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		vRefResult.push_back(getPreFieldPrintFrmDic(vStrResult[i], refField.wstrFieldName, prePrintInfos,vStrResult[i].size()));
+	}
+
+	/// check true 1
+	int nTrueTick[3] = {0,0,0};
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("√") != string::npos
+			|| vStrResult[i].find("v") != string::npos
+			|| vStrResult[i].find("ⅴ") != string::npos
+			|| vStrResult[i].find("Y") != string::npos
+			|| vStrResult[i].find("y") != string::npos)
+		{
+			nTrueTick[i] = 1;
+		}
+	}
+
+	if (nTrueTick[0] + nTrueTick[1] + nTrueTick[2] == 1)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nTrueTick[i])
+			{
+				vRefResult[i] += "*";
+			}
+			else
+			{
+				vRefResult[i] += "#";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	/// check false 1
+	int nFalseTick[3] = {0,0,0};
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("口") != string::npos
+			|| vStrResult[i].find("□") != string::npos)
+		{
+			nFalseTick[i] = 1;
+		}
+	}
+
+	if (nFalseTick[0] + nFalseTick[1] + nFalseTick[2] == 2)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nFalseTick[i])
+			{
+				vRefResult[i] += "#";
+			}
+			else
+			{
+				vRefResult[i] += "*";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	/// check true 2
+	nTrueTick[0] = 0;
+	nTrueTick[1] = 0;
+	nTrueTick[2] = 0;
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("/") != string::npos
+			|| vStrResult[i].find("曱") != string::npos
+			|| vStrResult[i].find("吖") != string::npos)
+		{
+			nTrueTick[i] = 1;
+		}
+	}
+
+	if (nTrueTick[0] + nTrueTick[1] + nTrueTick[2] == 1)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nTrueTick[i])
+			{
+				vRefResult[i] += "*";
+			}
+			else
+			{
+				vRefResult[i] += "#";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	/// check false 2
+	nFalseTick[0] = 0;
+	nFalseTick[1] = 0;
+	nFalseTick[2] = 0;
+	for (int i = 0; i < vStrResult.size(); i++)
+	{
+		if (vStrResult[i].find("口") != string::npos
+			|| vStrResult[i].find("□") != string::npos
+			|| vStrResult[i].find("日") != string::npos
+			|| vStrResult[i].find("曰") != string::npos)
+		{
+			nFalseTick[i] = 1;
+		}
+	}
+
+	if (nFalseTick[0] + nFalseTick[1] + nFalseTick[2] == 2)
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (nFalseTick[i])
+			{
+				vRefResult[i] += "#";
+			}
+			else
+			{
+				vRefResult[i] += "*";
+			}
+		}
+
+		vStrResult = vRefResult;
+		return true;
+	}
+
+	vStrResult = vRefResult;
+	return false;
+}
+
+/// 判断待识别域是否文字/数字/符号等.
+bool checkIfText(Mat img, int nType)
+{
+	CHECK_NE(img.empty(), true);
+
+	int nHeight = img.rows;
+	int nWidth  = img.cols;
+
+	/// 灰度
+	if (nType == 0)
+	{
+		Mat bw;
+		threshold(img, bw, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+
+		int nForeSum = 0, nForeCnt = 0;
+		int nBackSum = 0, nBackCnt = 0;
+
+		for (int i = 0; i < nHeight; i++)
+		{
+			for (int j = 0; j < nWidth; j++)
+			{
+				if ((i > nHeight / 8) && (i < nHeight * 7 / 8) && (j > nWidth / 16) && (j  < nWidth * 15 / 16))
+				{
+					if (bw.at<uchar>(i,j) > 128)
+					{
+						nForeSum += img.at<uchar>(i,j);
+						nForeCnt++;
+					}
+					else
+					{
+						nBackSum += img.at<uchar>(i,j);
+						nBackCnt++;
+					}					
+				}
+			}
+		}
+
+		/// 纯白/纯黑直接返回非文本
+		if (nForeCnt == 0 || nBackCnt == 0 || nForeCnt < 30)
+		{
+			return false;
+		}
+
+		/// 返回二值图像中白色区域的灰度均值
+		if ((nBackSum / nBackCnt - nForeSum / nForeCnt < 30) || (nForeSum / nForeCnt > 190))
+		{
+			return false;
+		}
+		else
+		{
+			return true;
+		}
+	}
+	else
+	{
+		return true;
+	}
+}
+
+/// 二值图像预处理，边界裁剪
+void preProcess(Mat& image)
+{	
+	CHECK_NE(image.empty(), true);
+
+	if (image.empty())
+	{
+		return;
+	}
+
+	int nTop	= -1;
+	int nBot	= -1;
+	int nLef	= -1;
+	int nRig	= -1;
+	int nColIdx = -1;
+	int nRowIdx = -1;
+
+	vector<double> vfColHist, vfRowHist;			
+
+	for (int i = 0; i < image.rows; i++)
+	{
+		vfRowHist.push_back(sum(image.row(i)).val[0]);
+	}
+
+	double fRowMax = getMax<double>(vfRowHist, nRowIdx);
+
+	for (int i = nRowIdx; i >= 0; i--)
+	{
+		if (fabs(vfRowHist[i] - 0) < DBL_EPSILON)
+		{
+			nTop = i;
+			break;
+		}
+	}
+
+	if (nTop == -1)
+	{
+		nTop = 0;
+	}
+
+	for (int i = nRowIdx; i < vfRowHist.size(); i++)
+	{
+		if (fabs(vfRowHist[i] - 0) < DBL_EPSILON)
+		{
+			nBot = i + 1;
+			break;
+		}
+	}
+
+	if (nBot == -1)
+	{
+		nBot = image.rows;
+	}
+
+	/// 裁剪上下边界图像
+	if (nBot - nTop > image.rows * 0.4)
+	{
+		image = image(Range(nTop, nBot), Range(0, image.cols));
+	}	
+
+	for (int i = 0; i < image.cols; i++)
+	{
+		vfColHist.push_back(sum(image.col(i)).val[0]);
+	}
+
+	double fColMax = getMax<double>(vfColHist, nColIdx);
+
+	for (int i = 0; i < nColIdx; i++)
+	{
+		if (fabs(vfColHist[i] - 0) > DBL_EPSILON)
+		{
+			nLef = i;
+			break;
+		}
+	}
+
+	if (nLef == -1)
+	{
+		nLef = 0;
+	}
+
+	for (int i = vfColHist.size() - 1; i > nColIdx;i--)
+	{
+		if (fabs(vfColHist[i] - 0) > DBL_EPSILON)
+		{
+			nRig = i + 1;
+			break;
+		}
+	}
+
+	if (nRig == -1)
+	{
+		nRig = image.cols;
+	}
+
+	/// 裁剪左右边界图像
+	image = image(Range(0, image.rows), Range(nLef, nRig));
+}
+
+
+void removeErrRegionOfBwImg(Mat &bw)
+{
+	if (bw.empty() || bw.channels() != 1)
+	{
+		return;
+	}
+
+	vector<vector<Point> > contours;
+	{
+		Mat tmpBw = bw.clone();
+		findContours(tmpBw, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+	}
+
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+		int leftGap=rc.x, 
+			rightGap=bw.cols-rc.br().x-1,
+			upGap=rc.y,
+			downGap=bw.rows-rc.br().y-1,
+			maxBorder=std::max(rc.width,rc.height);
+		//minBorder=std::min(rc.width,rc.height);
+		//int maxGap=std::max(downGap,std::max(upGap,std::max(leftGap,rightGap)));
+		int minGap=std::min(downGap,std::min(upGap,std::min(leftGap,rightGap)));
+		/*王博20180223将长宽高度限定为5，原为2，同时针对笔画穿透格线的情况进行处理*/
+		if ((rc.width <=5  && (abs(bw.cols - rc.br().x) < std::min((double)10,bw.cols/10.0) || rc.x < std::min((double)10,bw.cols/10.0)))///去残余边框线(左右)
+			|| (rc.height <= 5 && (abs(bw.rows - rc.br().y) < std::min((double)10,bw.rows/10.0) || rc.y < std::min((double)10,bw.rows/10.0)))///去残余边框线(上下)
+			||(minGap<std::min(bw.cols,bw.rows)/10&&maxBorder<0.2*std::min(bw.cols,bw.rows)))///去掉穿透格线笔画原为0.3改为0.2王博20180329
+		{
+			bw(rc) = 0;
+		}
+		/*///去掉穿透格线笔画
+		if(minGap<std::min(bw.cols,bw.rows)/20&&)*/
+	}
+}
+
+bool getValidTextRegion(Mat src, int &nLeft, int &nRight, int &nTop, int &nBottom)
+{
+	if (src.empty())
+	{
+		return false;
+	}
+
+	int nHeight = src.rows;
+	int nWidth  = src.cols;
+
+	int pad = 1;
+	copyMakeBorder(src, src, pad, pad, pad, pad, BORDER_CONSTANT, Scalar(0,0,0));
+
+	vector<vector<Point> > contours;
+	findContours(src, contours, CV_RETR_LIST|CV_RETR_EXTERNAL , CV_CHAIN_APPROX_NONE);
+
+	nTop = src.rows - 1;
+	nBottom = 0;
+	nLeft = src.cols - 1;
+	nRight = 0;
+
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+
+		if (rc.height < 8 && rc.width < 8 || rc.width > nHeight * 3)
+		{
+			continue;
+		}
+
+		nTop = min(nTop, rc.y);
+		nBottom = max(nBottom, rc.y + rc.height);
+		nLeft = min(nLeft, rc.x);
+		nRight = max(nRight, rc.x + rc.width);
+	}
+
+	nTop -= pad;
+	nBottom -= pad;
+	nLeft -= pad;
+	nRight -= pad;
+
+	/*nLeft = max(0, nLeft - nBottom + nTop);
+	nRight = min(nWidth, nRight + nBottom - nTop);*/
+	nLeft = max(0, nLeft);
+	nRight = min(nWidth, nRight );
+	if (nTop >= nBottom || nLeft >= nRight || (nBottom - nTop) < 10 || (nRight - nLeft) < 10)
+	{
+		return false;
+	}
+	else
+	{
+		return true;
+	}
+}
+
+bool CheckIfTextByBwImage(Mat bwImg, float fThres)
+{
+	if (bwImg.empty())
+	{
+		return false;
+	}
+
+	int height = bwImg.rows;
+	int width  = bwImg.cols;
+	int edge = 4;
+
+	if (height < 2 * edge || width < 2 * edge)
+	{
+		return false;
+	}
+
+	int nTmp, nMaxColSum = 0, nMaxRowSum = 0;
+
+
+	for (int i = edge; i < width - edge; i++)
+	{
+		nTmp = sum(bwImg.col(i))[0] / 255;
+		if (nTmp > nMaxColSum)
+		{
+			nMaxColSum = nTmp;
+		}
+	}
+
+	for (int i = edge; i < height - edge; i++)
+	{
+		nTmp = sum(bwImg.row(i))[0] / 255;
+		if (nTmp > nMaxRowSum)
+		{
+			nMaxRowSum = nTmp;
+		}
+	}
+
+	// 判决是否文本
+	if (nMaxRowSum < width * fThres && nMaxColSum < height * fThres)
+	{
+		return false;
+	}
+	else
+	{
+		return true;
+	}
+}
+
+bool have_black_text_check(const Mat &gray, Mat &bw, int min_val)
+{
+	if(bw.empty())threshold(gray, bw, 100, 255, THRESH_OTSU);
+	double white_val = 0, white_cnt = 0;
+	double black_val = 0, black_cnt = 0;
+	for (int i = 0; i < gray.rows; ++i)
+	{
+		for (int j = 0; j < gray.cols; ++j)
+		{
+			if (bw.at<uchar>(i, j) == 255)
+			{
+				++black_cnt;
+				black_val += gray.at<uchar>(i, j);
+			}
+			else
+			{
+				++white_cnt;
+				white_val += gray.at<uchar>(i, j);
+			}
+		}
+	}
+	black_val /= black_cnt;
+	white_val /= white_cnt;
+	if (black_cnt == 0 || abs(white_val - black_val) < min_val)
+	{
+		return false;
+	}
+	return true;
+}
+
+//对单元格识别前进行预处理(通用)
+bool eva_cell_preprocess_common(Mat& grayImg, Mat& bwImg){
+
+	if (bwImg.empty()) {
+		threshold(grayImg, bwImg, 0, 255, CV_THRESH_OTSU | CV_THRESH_BINARY_INV);
+	}
+	for(int i=0;i<bwImg.rows;i++)
+	{
+		for (int j=0;j<bwImg.cols;j++)
+		{
+			if (bwImg.at<uchar>(i,j)&&(i==0||i==bwImg.rows-1)||(j==0||j==bwImg.cols-1))
+			{
+				bwImg.at<uchar>(i,j)=0;
+			}
+		}
+	}
+	wipeNoise(bwImg);
+	removeErrRegionOfBwImg(bwImg);
+
+	int nLeft = 0,nTop = 0, nRight = 0, nBottom = 0;
+	bool bRet = getValidTextRegion(bwImg, nLeft, nRight, nTop, nBottom);
+	if (!bRet)
+	{
+		return false;
+	}
+
+	Rect roiRect = Rect(nLeft, nTop, nRight - nLeft, nBottom - nTop);
+	bwImg = bwImg(roiRect);
+	grayImg = grayImg(roiRect);
+
+	if (!CheckIfTextByBwImage(grayImg,0.4) || !have_black_text_check(grayImg, bwImg, 30)) {
+		return false;;
+	}		
+
+	return true;
+}
+
+void removeErrRegionOfBwImgSpecialForCheckMarkOnce(Mat &bw)//20171115王博专门为打勾（√）项改写
+{
+	if (bw.empty() || bw.channels() != 1)
+	{
+		return;
+	}
+
+	vector<vector<Point> > contours;
+	{
+		Mat tmpBw = bw.clone();
+		findContours(tmpBw, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+	}
+
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+		if (contours.size()<=1)
+		{
+			if ((rc.width <= 0.2*bw.cols && (abs(bw.cols - rc.br().x) < std::min((double)10,bw.cols/20.0) || rc.x < std::min((double)10,bw.cols/20.0)))
+				|| (rc.height <= 0.3*bw.rows&& (abs(bw.rows - rc.br().y) < std::min((double)10,bw.rows/15.0)))
+				|| (rc.height <= 0.25*bw.rows&&rc.y < std::min((double)10,bw.rows/20.0)))
+			{
+				bw(rc) = 0;
+			}
+		}
+		if (contours.size()>=2)
+		{
+			if ((rc.x<=1&&rc.y<=1)||(rc.x<=1&&rc.br().y>=bw.rows-2)||(rc.br().x>=bw.cols-2&&rc.br().y>=bw.rows-2))
+			{
+				continue;
+			}
+			if ((rc.width <= 0.1*bw.cols && (abs(bw.cols - rc.br().x) < std::min((double)10,bw.cols/20.0) || rc.x < std::min((double)10,bw.cols/20.0)))
+				|| (rc.height <= 0.15*bw.rows&& (abs(bw.rows - rc.br().y) < std::min((double)10,bw.rows/15.0) || rc.y < std::min((double)10,bw.rows/15.0))))
+			{
+				bw(rc) = 0;
+			}
+		}
+	}
+}
+void removeErrRegionOfBwImgSpecialForCheckMarkTwice(Mat &bw)//20171115王博专门为打勾（√）项改写
+{
+	if (bw.empty() || bw.channels() != 1)
+	{
+		return;
+	}
+
+	vector<vector<Point> > contours;
+	{
+		Mat tmpBw = bw.clone();
+		findContours(tmpBw, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+	}
+	for (int i = 0; i < contours.size(); i++)
+	{
+		Rect rc = boundingRect(contours[i]);
+		//int minSide=std::min(rc.width,rc.height);
+		if (contours.size()>1)
+		{
+			if ((rc.x<=1&&rc.y<=1)||(rc.x<=1&&rc.br().y>=bw.rows-2)||(rc.br().x>=bw.cols-2&&rc.br().y>=bw.rows-2))
+			{
+				continue;
+			}
+			if ((rc.width <= 0.1*bw.cols && (abs(bw.cols - rc.br().x) < std::min((double)10,bw.cols/20.0) || rc.x < std::min((double)10,bw.cols/20.0)))
+				|| (rc.height <= 0.15*bw.rows&& (abs(bw.rows - rc.br().y) < std::min((double)10,bw.rows/15.0) || rc.y < std::min((double)10,bw.rows/15.0))))
+			{
+				bw(rc) = 0;
+			}
+		}
+		if (contours.size()<=1)
+		{
+			if ((rc.width <= 0.2*bw.cols && (abs(bw.cols - rc.br().x) < std::min((double)10,bw.cols/20.0) || rc.x < std::min((double)10,bw.cols/20.0)))
+				|| (rc.height <= 0.3*bw.rows&& (abs(bw.rows - rc.br().y) < std::min((double)10,bw.rows/15.0)))
+				|| (rc.height <= 0.25*bw.rows&&rc.y < std::min((double)10,bw.rows/15.0)))
+			{
+				bw(rc) = 0;
+			}
+		}
+	}
+}
+///对单元格识别前进行预处理（针对对勾）
+bool eva_preprocess_specialForCheckMark(Mat& grayImg, Mat& bwImg){
+
+	if (bwImg.empty()) {
+		threshold(grayImg, bwImg, 0, 255, CV_THRESH_OTSU | CV_THRESH_BINARY_INV);
+	}
+
+	//removeErrRegionOfBwImg(bwImg);
+	//将图像的最外圈置黑（单像素）20171116王博修改
+	wipeNoise(bwImg);
+	removeErrRegionOfBwImgSpecialForCheckMarkOnce(bwImg);//20171115王博修改
+	removeErrRegionOfBwImgSpecialForCheckMarkTwice(bwImg);//20171115王博修改
+	for(int i=0;i<bwImg.rows;i++)
+	{
+		for (int j=0;j<bwImg.cols;j++)
+		{
+			if (bwImg.at<uchar>(i,j)&&(i==0||i==bwImg.rows-1/*||j==0||j==bwImg.cols-1*/))
+			{
+				bwImg.at<uchar>(i,j)=0;
+			}
+		}
+	}
+	//Rect  tRC;
+	//tRC.x=1;
+	//tRC.y=1;
+	//tRC.width=bwImg.cols-2;
+	//tRC.height=bwImg.rows-2;
+	//Mat tmp=bwImg(tRC);
+	////bwImg.zeros(bwImg.rows,bwImg.cols,CV_8UC1);
+	//
+	//Mat newBwImg=Mat::zeros(bwImg.size(),CV_8UC1);
+	//bwImg=newBwImg.clone();
+	//copyMakeBorder(tmp,tmp,1,1,1,1,BORDER_CONSTANT,Scalar(0));
+	//tmp.copyTo(bwImg);
+	//newBwImg.copyTo(bwImg);
+	int nLeft = 0,nTop = 0, nRight = 0, nBottom = 0;
+	bool bRet = getValidTextRegion(bwImg, nLeft, nRight, nTop, nBottom);
+	if (!bRet)
+	{
+		return false;
+	}
+
+	Rect roiRect = Rect(nLeft, nTop, nRight - nLeft, nBottom - nTop);
+	bwImg = bwImg(roiRect);
+	grayImg = grayImg(roiRect);
+
+	if (!CheckIfTextByBwImage(grayImg,0.4) || !have_black_text_check(grayImg, bwImg, 30)) {
+		return false;;
+	}		
+
+	return true;
+}
+
+//判断切片内水平方向穿越的最大次数
+int HCrossTimes(Mat bw){
+	int cnt, maxCnt;
+	maxCnt=0;
+	bool start;
+	for( int i = 0 ; i < bw.rows ;i++)
+	{
+		bool start;
+		cnt=0;
+		start=false;
+		for ( int j = 0; j < bw.cols; j++)
+		{
+			if (bw.at<uchar>( i , j )&&!start)
+			{
+				start=true;
+			}
+			if (!bw.at<uchar>( i , j )&&start)
+			{
+				cnt++;
+				start=false;
+			}
+		}
+		maxCnt=std::max(maxCnt,cnt);
+	}
+	return maxCnt;
+}
+//根据输入模板对fields和cell进行识别，并匹配上输出格式模板和细分类类型
+int eva_form_recog_fields_cell(long handle, Mat g_bw, Mat g_gray, Mat g_table, Mat g_grayNoLines, Mat g_bwNoLines, inModel& m_inModel, OutForm& m_outModel, inEVAFormType inType, outEVAFormType& outType)
+{
+	if (handle<=0)
+	{
+		return EVA_RET_ERR_HANDLE;
+	}
+	eva_form_recog_allHandle* engine=(eva_form_recog_allHandle*)handle;
+	allPreInfos* model_engine=(allPreInfos*)(engine->modelHandle);
+	//识别前对灰度图去格线处理
+	/*for(int i=0;i<g_table.rows;i++)
+	{
+	for (int j=0;j<g_table.cols;j++)
+	{
+	if (g_table.at<uchar>(i,j))
+	{
+	g_gray.at<uchar>(i,j)=255;
+	}
+	}
+	}*/
+	/// Field Recognition
+	for (int i = 0; i < m_inModel.tFields.size(); i++)
+	{
+		Rect roi = m_inModel.tFields[i].tFieldRect;
+		if (roi.x < 0 || roi.y < 0 || roi.width <= 0 || roi.height <= 1 || roi.br().x >= g_gray.cols || roi.br().y >= g_gray.rows)
+		{
+			continue;
+		}
+
+		Mat gray = g_grayNoLines(roi).clone(), tBw;
+
+		threshold(gray, tBw, 0, 255, THRESH_OTSU | THRESH_BINARY_INV);
+		wipeNoise(tBw);
+		vector<string> vStrResult;
+		string strResult;
+		int nConf = 0;
+
+		FieldClassify(engine->recogHandle, tBw, vStrResult, nConf);
+		//根据特定field识别结果确定输出的版式
+		switch(inType)
+		{
+		case IN_EVA_XRYR:
+			outType=OUT_EVA_XRYR;
+
+			break;
+		case IN_EVA_XTB:
+			outType=OUT_EVA_XTB;
+			break;
+		case IN_EVA_HGGB:
+			outType=OUT_EVA_HGGB;
+			break;
+		default:
+			break;
+		}
+		if (vStrResult.size() == 1)
+		{
+			/// 有可供参考的预印字信息时
+			if (model_engine->m_prePrintInfos.size())
+			{
+				string strResult = getPreFieldPrintFrmDic(vStrResult[0], m_inModel.tFields[i].wstrFieldName, model_engine->m_prePrintInfos, vStrResult[0].size());
+				if(strResult=="主要负责人填写"||strResult=="主要负责人")
+				{
+					m_inModel.tFields[i].str ="主要负责人";										
+					m_inModel.tFields[i].cof = 1;
+				}
+				else if(strResult=="其他会管干部填写"||strResult=="其他会管干部")
+				{
+					m_inModel.tFields[i].str ="其他会管干部";										
+					m_inModel.tFields[i].cof = 1;
+				}
+				else if (strResult=="中层干部填写"||strResult=="中层干部")
+				{
+					m_inModel.tFields[i].str ="中层干部";										
+					m_inModel.tFields[i].cof = 1;
+				}
+				else if (strResult=="其他干部填写"||strResult=="其他干部")
+				{
+					m_inModel.tFields[i].str ="其他干部";										
+					m_inModel.tFields[i].cof = 1;
+				}
+				else
+				{
+					m_inModel.tFields[i].str = strResult;										
+					m_inModel.tFields[i].cof = 1;
+				}
+				//strResult.clear();
+			}
+			else
+			{
+				m_inModel.tFields[i].str = vStrResult[0];										
+				m_inModel.tFields[i].cof = nConf;
+				//strResult.clear();
+			}
+			if(m_inModel.tFields[i].str=="市场组织和运营类")
+			{
+				outType=OUT_EVA_HGBZ_ZZYY;
+			}
+			if(m_inModel.tFields[i].str=="监管支持类")
+			{
+				outType=OUT_EVA_HGBZ_JGZC;
+			}
+			if(m_inModel.tFields[i].str=="自律服务类")
+			{
+				outType=OUT_EVA_HGBZ_ZLFW;
+			}
+		}
+		else if (vStrResult.size() == 3)
+		{
+			///  这里需要进行“√”符号的判定
+			if (model_engine->m_prePrintInfos.size())
+			{
+				bool bRet = checkTrueTick(vStrResult, m_inModel.tFields[i], model_engine->m_prePrintInfos);
+				if (bRet)
+				{
+					nConf = 1;
+				}
+				else
+				{
+					nConf = 0;
+				}
+			}			
+
+			string strResult = vStrResult[0] + vStrResult[1] + vStrResult[2];
+			m_inModel.tFields[i].str = strResult;
+			m_inModel.tFields[i].cof = nConf;	
+		}
+		else 
+		{
+			m_inModel.tFields[i].str = "";
+			m_inModel.tFields[i].cof = 0;
+		}					
+	}
+
+	///后面人名匹配时候需要预先知晓单位名称
+	string companyName;
+	for (int n=0;n<m_inModel.tFields.size();n++)
+	{
+		if (m_inModel.tFields[n].wstrFieldName==L"单位"||m_inModel.tFields[n].wstrFieldName==L"单位名称")
+		{
+			companyName=m_inModel.tFields[n].str;
+		}
+	}
+	//根据field识别结果确定输出版式
+	for (int m=0;m<model_engine->m_outRefForm.size();m++)
+	{
+		if (outType==model_engine->m_outRefForm[m].typeFlag)
+		{
+			m_outModel=model_engine->m_outRefForm[m];
+			break;
+		}
+	}
+
+	//table识别
+	for (int k = 0; k < m_inModel.tTable.size(); k++)
+	{
+		string strResult;
+		//strResult.clear();
+		int nConf = 0;
+		Rect roi = m_inModel.tTable[k].tCellRect;
+
+		if (roi.x < 0 || roi.y < 0 || roi.width <= 0 || roi.height <= 1 || roi.br().x >= g_gray.cols || roi.br().y >= g_gray.rows)
+		{
+			continue;
+		}
+
+		Mat tBw/* = g_bw(roi).clone()*/, gray = g_grayNoLines(roi).clone(), ref = g_table(roi).clone();//王博20180330改为在去线灰度图上截取单元格
+
+		if (gray.empty())
+		{
+			continue;
+		}
+
+		/// 预处理1， 边界填充，防止格线产生影响
+		for (int row = 0; row < gray.rows; row++)
+		{
+			for (int col = 0; col < gray.cols; col++)
+			{
+				if (ref.at<uchar>(row, col) > 128 
+					&& (row < 15 || row > gray.rows - 15 || col < 15 || col > gray.cols - 15) )
+				{
+					gray.at<uchar>(row, col) = 255;
+				}
+			}
+		}
+		if (m_inModel.tTable[k].chCellType==2)
+		{
+			if (!eva_preprocess_specialForCheckMark(gray,tBw))
+			{
+				strResult="";
+				nConf=0;
+				//return EVA_RET_ERR_RECO;
+				continue;
+			}
+		} 
+		else
+		{
+			if (!eva_cell_preprocess_common(gray,tBw))
+			{
+				strResult="";
+				nConf=0;
+				//return EVA_RET_ERR_RECO;
+				continue;
+			}
+		}
+
+		///// 判断待识别域是否为空
+		//if (!checkIfText(gray, 0)/* && m_inModel.tTable[k].chCellType != 3*/)
+		//{
+		//	continue;
+		//}
+
+		///// 预处理2，二值化+边界裁剪
+		//threshold(gray, gray, 0, 255, THRESH_OTSU | THRESH_BINARY_INV);
+		//tBw = gray & tBw;
+		//preProcess(tBw);
+
+		/*string strResult;
+		int nConf = 0;*/
+
+		if (m_inModel.tTable[k].chCellType == EVA_TYPE_NUM)
+		{				
+			//stringstream ss;
+			//ss << "E:/deep data/手写数字/" << g_num++ << ".png";
+			//imwrite(ss.str(), tBw);
+			Mat tmp = Mat::zeros(tBw.rows+2, tBw.cols+2, tBw.type());
+			tBw.copyTo(tmp(Range(1, tmp.rows-1), Range(1,tmp.cols-1)));
+			double cof=0.0;
+			bool ret=MNIST_Calculate(tmp,strResult,cof);
+			nConf=10000*cof;
+			//AllEngine_Classify(engine->recogHandle, CHAR_DICR, tmp, strResult, nConf);//原为CHAR_DICR
+
+			/// 针对存在的一些识别异常添加后处理20180402
+			if(strResult=="0"||strResult=="1")
+			{
+				strResult="10";
+			}
+
+
+			/*if (strResult.size() >= 2 && (strResult.substr(0,1) != "1" || strResult.substr(1,1) != "0")) 
+			{
+				if (strResult.substr(0,1) != "1" && strResult.substr(1,1) == "0")
+				{
+					strResult = "10";
+				}
+				else if (strResult.substr(0,1) == "0")
+				{
+					strResult = "0";
+				}
+				else if (strResult.substr(0,1) == "4")
+				{
+					strResult = "8";
+				}
+				else if (strResult.substr(0,1) == strResult.substr(1,1))
+				{
+					strResult = strResult.substr(1,1);
+				}	
+				else if(strResult.substr(0,2) == "1")
+				{
+					strResult = "10";
+				}
+			}*/
+		}
+		else if (m_inModel.tTable[k].chCellType == EVA_TYPE_CHN)
+		{
+			AllEngine_Classify(engine->recogHandle, CHAR_LINE, tBw, strResult, nConf);
+			strResult = getPreFieldPrintFrmDic(strResult, classToWStr(companyName), model_engine->m_refCompPerson);
+		}
+		else if (m_inModel.tTable[k].chCellType == EVA_TYPE_SIG)
+		{
+			int crossTimes=HCrossTimes(tBw); //20171103王博添加针对对勾“√”的水平方向笔画穿越判断
+			if(crossTimes>=2)
+			{
+				strResult = "√";
+			}
+			else
+			{
+				strResult = "";
+			}
+			/*	AllEngine_Classify(engine->recogHandle, CHAR_LINE, tBw, strResult, nConf);
+			if (Table_True_Sig.find(classToWStr(strResult)) != string::npos)
+			{
+			strResult = "√";
+			}
+			else
+			{
+			strResult = "";
+			}
+			strResult = "√";*/
+		}
+		else if (m_inModel.tTable[k].chCellType == EVA_TYPE_STR)
+		{
+			AllEngine_Classify(engine->recogHandle, CHAR_RICR, tBw, strResult, nConf);					
+		}		
+
+		m_inModel.tTable[k].str = strResult;
+		m_inModel.tTable[k].cof = nConf;
+	}
+	return EVA_RET_OK;
+}
+
+
+int FindTableIdx(vector<Cell> value, int nRefRow, int nRefCol)
+{
+	CHECK_GT(value.size(), 0);
+
+	int nIdx = -1;
+	for (int i = 0; i < value.size(); i++)
+	{
+		if (value[i].iRow == nRefRow && value[i].iCol == nRefCol)
+		{
+			nIdx = i;
+			break;
+		}
+	}
+
+	return nIdx;
+}
+//判断是否是数字
+bool IsNumberRecogResult(tstring tstrRecog)
+{
+	if (tstrRecog.empty())
+	{
+		return false;
+	}
+
+	tstring tstrNum = _T("0123456789.");
+
+	tstring::const_iterator iter_Num;
+	tstring::const_iterator iter_Rec;
+
+	bool bRtn = true;
+	for (iter_Rec = tstrRecog.begin(); iter_Rec != tstrRecog.end() && bRtn; iter_Rec++)
+	{
+		bool bFindNum = false;
+		for (iter_Num = tstrNum.begin(); iter_Num != tstrNum.end() && (!bFindNum); iter_Num++)
+		{
+			if (*iter_Num == *iter_Rec)
+			{
+				bFindNum = true;
+			}
+		}
+		if (!bFindNum)
+		{
+			bRtn = false;
+		}
+	}
+	return bRtn;
+}
+
+bool eva_form_recog_inPut2Out(inModel outModel, OutForm& outForm, OutForm& result)
+{
+	if (outModel.tFields[0].wstrFieldName != outForm.tOutputFieldsForm[0].tstrFieldName
+		|| outModel.tFields.size() != outForm.tOutputFieldsForm.size())
+	{
+		LOG(ERROR) << "Input and Output Form Not Match.";
+		return false;
+	}
+
+	/// Fields
+	for (int i = 0; i < outForm.tOutputFieldsForm.size(); i++)
+	{		
+		outForm.tOutputFieldsForm[i].tstrFieldRecRes = classToWStr<string>(outModel.tFields[i].str);
+		outForm.tOutputFieldsForm[i].dbConf = outModel.tFields[i].cof;		
+	}
+
+	/// Tables
+	for (int i = 0; i < outForm.tOutputTableForm.size(); i++)
+	{
+		for (int j = 0; j < outForm.tOutputTableForm[i].tOutputCellList.size(); j++)
+		{			
+			/// TableElement 1
+			int nRefRow = outForm.tOutputTableForm[i].tOutputCellList[j].iRowNum;
+			int nRefCol = outForm.tOutputTableForm[i].tOutputCellList[j].iColNum;
+
+			int nFlag = FindTableIdx(outModel.tTable, nRefRow, nRefCol);	
+			if (nFlag != -1)
+			{
+				string str = outModel.tTable[nFlag].str;
+				if (str.size() == 0)
+				{
+					outForm.tOutputTableForm[i].tOutputCellList[j].tstringContent = L"";
+					outForm.tOutputTableForm[i].tOutputCellList[j].dbConf = 1.0;
+				}
+				else
+				{					
+					outForm.tOutputTableForm[i].tOutputCellList[j].tstringContent = classToWStr<string>(str);
+					outForm.tOutputTableForm[i].tOutputCellList[j].dbConf = outModel.tTable[nFlag].cof;
+				}				
+			}
+
+			/// TableElement 2
+			for (int k = 0; k < outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+			{
+				nRefRow = outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].iRowNum;
+				nRefCol = outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].iColNum;
+
+				nFlag = FindTableIdx(outModel.tTable, nRefRow, nRefCol);
+				if (nFlag != -1)
+				{
+					string str = outModel.tTable[nFlag].str;
+					if (str.size() == 0)
+					{
+						outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = L"";
+						outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].dbConf = 1.0;
+					}
+					else
+					{			
+						outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = classToWStr<string>(str);
+						outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].dbConf = outModel.tTable[nFlag].cof;
+						bool isNumberCells = IsNumberRecogResult(outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent);
+						if(isNumberCells)
+						{
+							if (outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].dbConf<0.0)
+							{
+								outForm.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = L"";
+							} 
+						}
+					}
+				}				
+			}
+		}
+	}
+
+	result = outForm;
+
+	/// 对带勾号的进行结果转换
+	int nStrCnt = 0;
+	for (int i = 0; i < outModel.tTable.size(); i++)
+	{
+		if (outModel.tTable[i].chCellType == 2)
+		{
+			nStrCnt++;
+		}		
+	}
+
+	if (nStrCnt > outModel.tTable.size() * 0.5)
+	{
+		LOG(INFO) << "Need Trans.";
+		for (int i = 0; i < result.tOutputTableForm.size(); i++)
+		{
+			for (int j = 0; j < result.tOutputTableForm[i].tOutputCellList.size(); j++)
+			{
+				bool bFlag = false;
+				for (int k = 0; k < result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+				{
+					if (result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent == L"√")
+					{
+						bFlag = true;
+						break;
+					}					
+				}
+
+				if (bFlag)
+				{
+					for (int k = 0; k < result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+					{
+						if (result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent == L"√")
+						{
+							result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = L"*";	
+						}
+						else if (result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent == L"")
+						{
+							result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = L"#";	
+						}
+					}
+				}
+				else
+				{
+					for (int k = 0; k < result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+					{
+						if (result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent == L"")
+						{
+							result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = L"null";				
+						}
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		LOG(INFO) << "No Need Trans.";
+		for (int i = 0; i < result.tOutputTableForm.size(); i++)
+		{
+			for (int j = 0; j < result.tOutputTableForm[i].tOutputCellList.size(); j++)
+			{
+				bool bFlag = false;
+				for (int k = 0; k < result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+				{
+					if (result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent != L"")
+					{
+						bFlag = true;
+						break;
+					}					
+				}
+
+				if (!bFlag)
+				{
+					for (int k = 0; k < result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+					{
+						result.tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent = L"null";
+					}
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+bool InsertModelTitle(TiXmlElement *pRoot, tstring tstrDocumentType)
+{
+	if (pRoot == NULL)
+	{
+		return false;
+	}
+
+	/// Model Title	
+	TiXmlElement *pDocType = new TiXmlElement("DocumentType");
+	if (pDocType == NULL)
+	{
+		return false;
+	}
+
+	pDocType->LinkEndChild(new TiXmlText(classToStr<tstring>(tstrDocumentType).c_str()));
+	pRoot->LinkEndChild(pDocType);
+
+	return true;
+}
+
+bool InsertModelField(TiXmlElement *pRoot, vector<OutField> tOutputFieldsForm)
+{
+	if (pRoot == NULL /*|| outModel.tOutputFieldsForm.size() < 1*/)
+	{
+		return false;
+	}
+
+	TiXmlElement *pFields = new TiXmlElement("Fields");
+	if (pFields == NULL)
+	{
+		return false;
+	}
+
+	pRoot->LinkEndChild(pFields);
+
+	for (int i = 0; i < tOutputFieldsForm.size(); i++)
+	{
+		TiXmlElement *pEle = new TiXmlElement("Field");
+		if (pEle == NULL)
+		{
+			return false;
+		}
+
+		pFields->LinkEndChild(pEle);
+
+		/// FieldName
+		TiXmlElement *pEleName = new TiXmlElement("FieldName");
+		if (pEleName == NULL)
+		{
+			return false;
+		}
+
+		pEleName->LinkEndChild(new TiXmlText(classToStr<tstring>(tOutputFieldsForm[i].tstrFieldName).c_str()));
+		pEle->LinkEndChild(pEleName);
+
+		/// FieldValue
+		TiXmlElement *pEleValue = new TiXmlElement("FieldValue");
+		if (pEleValue == NULL)
+		{
+			return false;
+		}
+
+		pEleValue->LinkEndChild(new TiXmlText(classToStr<tstring>(tOutputFieldsForm[i].tstrFieldRecRes).c_str()));
+		pEle->LinkEndChild(pEleValue);
+
+		/// FieldValueConfidence
+		TiXmlElement *pCof = new TiXmlElement("FieldValueConfidence");
+		if (pCof == NULL)
+		{
+			return false;
+		}
+
+		pCof->LinkEndChild(new TiXmlText(classToStr<double>(tOutputFieldsForm[i].dbConf).c_str()));
+		pEle->LinkEndChild(pCof);				
+	}
+
+	return true;
+}
+
+/// 嵌入Table识别结果到XML文件中
+bool InsertModelTable(TiXmlElement *pRoot, vector<OutTable> tOutputTableForm)
+{
+	if (pRoot == NULL /*|| outModel.tOutputTableForm.size() < 1*/)
+	{
+		return false;
+	}
+
+	/// Tables
+	TiXmlElement *pTables = new TiXmlElement("Tables");
+	if (pTables == NULL)
+	{
+		return false;
+	}
+
+	pRoot->LinkEndChild(pTables);
+
+	for (int i = 0; i < tOutputTableForm.size(); i++)
+	{
+		/// Table
+		TiXmlElement *pTable = new TiXmlElement("Table");
+		if (pTable == NULL)
+		{
+			return false;
+		}
+
+		pTables->LinkEndChild(pTable);
+
+		/// TableName
+		TiXmlElement *pTableName = new TiXmlElement("TableName");
+		if (pTableName == NULL)
+		{
+			return false;
+		}
+
+		pTableName->LinkEndChild(new TiXmlText(classToStr<tstring>(tOutputTableForm[i].tstrTableName).c_str()));
+		pTable->LinkEndChild(pTableName);
+
+		/// TablePosition
+		TiXmlElement *pTablePosition = new TiXmlElement("TablePosition");
+		if (pTablePosition == NULL)
+		{
+			return false;
+		}
+
+		pTablePosition->LinkEndChild(new TiXmlText(classToStr<int>(tOutputTableForm[i].iTablePosition).c_str()));
+		pTable->LinkEndChild(pTablePosition);
+
+		/// Cells
+		TiXmlElement *pCells = new TiXmlElement("Cells");
+		if (pCells == NULL)
+		{
+			return false;
+		}
+
+		pTable->LinkEndChild(pCells);
+
+		/// Cell
+		for (int j = 0; j < tOutputTableForm[i].tOutputCellList.size(); j++)
+		{
+			TiXmlElement *pCell = new TiXmlElement("Cell");
+			if (pCell == NULL)
+			{
+				return false;
+			}
+
+			pCells->LinkEndChild(pCell);
+
+			/// CellTitle
+			TiXmlElement *pCellTitle = new TiXmlElement("CellTitle");
+			if (pCellTitle == NULL)
+			{
+				return false;
+			}	
+
+			pCellTitle->LinkEndChild(new TiXmlText(classToStr<tstring>(tOutputTableForm[i].tOutputCellList[j].tstringContent).c_str()));
+			pCell->LinkEndChild(pCellTitle);
+
+			/// CellTitleConfidence
+			TiXmlElement *pCellTitleConfidence = new TiXmlElement("CellTitleConfidence");
+			if (pCellTitleConfidence == NULL)
+			{
+				return false;
+			}
+
+			pCellTitleConfidence->LinkEndChild(new TiXmlText(classToStr<double>(tOutputTableForm[i].tOutputCellList[j].dbConf).c_str()));
+			pCell->LinkEndChild(pCellTitleConfidence);
+
+			/// CellCorrelatedKeyValues
+			TiXmlElement* CellCorrelatedKeyValues = new TiXmlElement("CellCorrelatedKeyValues");
+			if (CellCorrelatedKeyValues == NULL)
+			{
+				return false;
+			}
+
+			pCell->LinkEndChild(CellCorrelatedKeyValues);
+
+			for (int k = 0; k < tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells.size(); k++)
+			{
+				/// KeyAndValue
+				TiXmlElement *pKeyAndValue = new TiXmlElement("KeyAndValue");
+				if (pKeyAndValue == NULL)
+				{
+					return false;
+				}
+
+				CellCorrelatedKeyValues->LinkEndChild(pKeyAndValue);
+
+				/// Key
+				TiXmlElement *pKey = new TiXmlElement("Key");
+				if (pKey == NULL)
+				{
+					return false;
+				}
+
+				pKey->LinkEndChild(new TiXmlText(classToStr<tstring>(tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrCorrelatedContent).c_str()));
+				pKeyAndValue->LinkEndChild(pKey);
+
+				/// RecogValue
+				TiXmlElement *pRecogValue = new TiXmlElement("RecogValue");
+				if (pRecogValue == NULL)
+				{
+					return false;
+				}	
+
+				pRecogValue->LinkEndChild(new TiXmlText(classToStr<tstring>(tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].tstrRecogContent).c_str()));
+				pKeyAndValue->LinkEndChild(pRecogValue);
+
+				/// RecogValueConfidence
+				TiXmlElement *pRecogValueConfidence = new TiXmlElement("RecogValueConfidence");
+				if (pRecogValueConfidence == NULL)
+				{
+					return false;
+				}
+
+				pRecogValueConfidence->LinkEndChild(new TiXmlText(classToStr<double>(tOutputTableForm[i].tOutputCellList[j].tCorrelatedCells[k].dbConf).c_str()));
+				pKeyAndValue->LinkEndChild(pRecogValueConfidence);
+			}
+		}
+	}
+
+	return true;
+}
+
+bool eva_form_recog_XML2Str(OutForm result,string& strRes)
+{
+	if (!(result.tOutputTableForm.size()&&result.tOutputFieldsForm.size()))
+	{
+		return false;
+	}
+	TiXmlDocument tXmlDoc;
+	TiXmlDeclaration* pTitle = new TiXmlDeclaration("1.0", "GB2312", "mIv@2016");
+	if (NULL == pTitle)
+	{
+		return false;
+	}
+	tXmlDoc.LinkEndChild(pTitle);
+
+	TiXmlElement *pRoot = new TiXmlElement("Result");
+	if (NULL == pRoot)
+	{
+		return false;
+	}
+	tXmlDoc.LinkEndChild(pRoot);
+
+	/// Model Title
+	InsertModelTitle(pRoot, result.tstrDocumentType);
+
+	/// Model Field
+	InsertModelField(pRoot, result.tOutputFieldsForm);
+
+	/// Model Table
+	InsertModelTable(pRoot, result.tOutputTableForm);
+
+	/// output the result.
+	TiXmlPrinter printer;
+	tXmlDoc.Accept(&printer);
+	strRes = printer.CStr();
+}
+
+LIBEVALUATIONFORMRECOGNITION_API int eva_form_recog_byMat(long handle,Mat recogMat,string& recogResult,outEVAFormType& outType)
+{
+	if (handle<=0)
+	{
+		return EVA_RET_ERR_HANDLE;
+	}
+	if (recogMat.empty())
+	{
+		return EVA_RET_ERR_IMG_DATA;
+	}
+
+	Mat g_bwImg, g_resizeImg,g_resultTable,g_grayWithoutLines,g_bwWithoutLines;//全局的二值图，归一化图，重构格线图,灰度去格线图，二值去格线图
+	inModel m_inModel;//通过标题识别确定的当前图像输入版式
+	OutForm m_outModel;//通过域识别确定输出版式
+	inEVAFormType inType;//通过layout确定输入类型
+	//outEVAFormType outType;
+	int layOutFlag=eva_form_recog_layoutanalysis(handle,recogMat,g_bwImg,g_resizeImg,g_resultTable,g_grayWithoutLines,g_bwWithoutLines,m_inModel,inType);
+	if (layOutFlag<0)
+	{
+		return EVA_RET_ERR_NO_MATCH;
+	}
+	int recogFlag=eva_form_recog_fields_cell(handle,g_bwImg,g_resizeImg,g_resultTable,g_grayWithoutLines,g_bwWithoutLines,m_inModel,m_outModel,inType,outType);//根据版面layout分析结果，识别field域和cell域
+	if (recogFlag<0)
+	{
+		return EVA_RET_ERR_RECO;
+	}
+	OutForm result;
+	bool bTrans2out=eva_form_recog_inPut2Out(m_inModel,m_outModel,result);//以输出模板为指导对识别结果进行组织
+	if (!bTrans2out)
+	{
+		return EVA_RET_ERR_IN_TRANS_OUT;
+	}
+	//string strResult=string();
+	recogResult.clear();
+	bool bTrans2String=eva_form_recog_XML2Str(result,recogResult);
+	//recogResult=strResult;
+	//strResult.clear();
+	return EVA_RET_OK;
+}
+LIBEVALUATIONFORMRECOGNITION_API int eva_form_recog_byPath(long handle,string imgPath,/*iEVAFormType tableType,*/string& recogResult,outEVAFormType& outType)
+{
+	if (handle<=0)
+	{
+		return EVA_RET_ERR_HANDLE;
+	}
+	if (!imgPath.size())
+	{
+		return EVA_RET_ERR_IMG_PATH;
+	}
+	Mat src;
+	ImageFile2Mat(imgPath.c_str(), src);
+	if (src.empty())
+	{
+		return EVA_RET_ERR_IMG_DATA;
+	}
+	return eva_form_recog_byMat(handle,src,recogResult,outType);
+}

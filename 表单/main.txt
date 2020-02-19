@@ -1,0 +1,1068 @@
+
+#include "mIvCommon.h"
+//#include "libTableOCR.h"
+#include "libReadImageByFreeImage.h"
+#include "libTableFormRecognition.h"
+
+
+#include "tinyxml.h"
+#pragma comment(lib, "tinyxml.lib")
+
+/// <==========================================================================================> ///
+
+void SaveResultToCsv(string &inputFile, vector<iTableFormCell> &locations);
+
+void SaveResultToCsv(string &inputFile, vector<vector<iTableFormCell>> &locations);
+
+/// <==========================================================================================> ///
+const int threadNum = 8;	/// 线程数
+#define HW_NAME_SEG
+#define ARR_MODE
+struct tableFormThreadParam{
+	char* imgFileName;
+	long handle;
+#ifndef ARR_MODE
+	vector<iTableFormCell> result;
+#else
+	vector<vector<iTableFormCell>> result;
+#endif
+};
+tableFormThreadParam vecFormThreadParam[threadNum];	/// 线程参数
+
+HANDLE threadHandle[threadNum];						/// 线程句柄
+CRITICAL_SECTION cs;								/// 临界区，可以理解为锁定一个资源（防止多个线程同时执行一个特定代码节的机制）
+
+unsigned __stdcall TableFormFunc(void* ptr){
+	tableFormThreadParam &objThreadPara = *(tableFormThreadParam*)ptr;
+	EnterCriticalSection(&cs);
+	LOG(INFO) << objThreadPara.imgFileName;
+	LeaveCriticalSection(&cs);
+#ifndef ARR_MODE		
+	fIvTableFormRecog_path(objThreadPara.handle, objThreadPara.imgFileName, objThreadPara.result, iTableFormType::FORM_NORM);
+#else
+	fIvTableFormRecog_path(objThreadPara.handle, objThreadPara.imgFileName, objThreadPara.result/*, iTableFormType::FORM_NORM*/);
+#endif
+	//SaveResultToCsv(string(objThreadPara.imgFileName), objThreadPara.result);
+	
+	return 0;
+}
+
+/// <==========================================================================================> ///
+void test_tableform(int argc, char* argv[]);
+
+void test_tableform_multiHandle(int argc, char* argv[]);
+
+void fIvTableForm_postProcess(vector<vector<iTableFormCell>>& arrTableFormResult);
+
+bool chkXml(string xmlPath, vector<vector<string>>& arrStrDic, vector<vector<int>> & arrIntMul);
+
+
+/// <==========================================================================================> ///
+
+void main(int argc, char* argv[]){
+
+	test_tableform(argc,argv);
+
+	return;
+	
+	test_tableform_multiHandle(argc, argv);
+}
+
+
+/// <==========================================================================================> ///
+
+void SaveResultToCsv(string &inputFile, vector<iTableFormCell> &locations) {
+	EnterCriticalSection(&cs);
+	
+	string outFile = inputFile.substr(0, inputFile.size() - 4) + ".csv";
+	
+	int nIdx = outFile.find_last_of('\\');
+	_mkdir(string(outFile.substr(0, nIdx + 1) + "table_form_vec").c_str());
+	outFile = outFile.substr(0, nIdx + 1) + "table_form_vec\\" + outFile.substr(nIdx + 1, outFile.size() - nIdx);
+
+	ofstream ofFile;
+	ofFile.open(outFile, ios::out);
+	if (!ofFile) {
+		LOG(INFO) << "Create File Failed!";
+		return;
+	}
+
+	for (int i = 0; i < locations.size(); i++) {
+		ofFile<< locations[i].str <<endl;;
+	}
+	ofFile.close();
+
+	LeaveCriticalSection(&cs);
+}
+
+void SaveResultToCsv(string &inputFile, vector<vector<iTableFormCell>> &locations) {
+	EnterCriticalSection(&cs);
+
+	string outFile = inputFile.substr(0, inputFile.size() - 4) + ".csv";
+	int nIdx = outFile.find_last_of('\\');
+	_mkdir(string(outFile.substr(0, nIdx + 1) + "table_form_arr").c_str());
+	outFile = outFile.substr(0, nIdx + 1) + "table_form_arr\\" + outFile.substr(nIdx + 1, outFile.size() - nIdx);
+
+	ofstream ofFile;
+	ofFile.open(outFile, ios::out);
+	if (!ofFile) {
+		LOG(INFO) << "Create File Failed!";
+		return;
+	}
+
+	for (int i = 0; i < locations.size(); i++) {
+		for (int j = 0; j < locations[i].size(); j++) {
+			ofFile<< locations[i][j].str;
+			if (j == locations[i].size() - 1) {
+				ofFile<< endl;
+			}
+			else {
+				ofFile<< ",";
+			}
+		}
+	}
+	ofFile.close();
+
+	LeaveCriticalSection(&cs);
+}
+
+void test_tableform(int argc, char* argv[]){
+	if (argc<2)
+	{
+		return;
+	}
+	
+#ifdef HW_NAME_SEG
+	path=argv[1];
+#endif
+	
+	vector<string> filePath;
+	readDirFrmFile(path, filePath);
+
+	long handle = fIvTableFormRecog_Init("");
+	if (handle <= 0) {
+		LOG(INFO) << "识别引擎加载失败!";
+		return;
+	}
+	fIvTableFormRecog_SetQuality(handle, "", false);
+
+	float fSum = 0;
+	int nCnt = 0;
+	for (int i = 0; i < filePath.size(); i++) {
+		string imgPath = filePath[i];		
+		
+		LOG(INFO) << i << ", " << imgPath;
+
+		fstream imageFile((string)imgPath, std::ios::binary|std::ios::in);
+		if (!imageFile.is_open()) {
+			return ;
+		}
+
+		/// 获取图像大小
+		imageFile.seekg(0, std::ios::end);
+		int imageSize = imageFile.tellg();
+		imageFile.seekg(0, std::ios::beg);
+
+		/// 获取图像数据流
+		char* data_steam = new char[imageSize];
+		imageFile.read((char*)data_steam, imageSize);
+		imageFile.close();
+
+		__TIC__;
+#ifndef ARR_MODE
+		vector<iTableFormCell> vTableFormResult;
+		int nRet = fIvTableFormRecog_path(handle, imgPath, vTableFormResult, iTableFormType::FORM_NORM);
+#else
+		vector<vector<iTableFormCell>> arrTableFormResult;
+		int nRet = fIvTableFormRecog_data(handle, data_steam, imageSize, arrTableFormResult);
+		fIvTableForm_postProcess(arrTableFormResult);
+#endif
+		__TOC__;
+		
+		InitializeCriticalSection(&cs);
+#ifndef ARR_MODE
+		SaveResultToCsv(imgPath, vTableFormResult);
+#else
+		SaveResultToCsv(imgPath, arrTableFormResult);
+#endif
+#ifdef HW_NAME_SEG
+		Mat src=imread(imgPath,1);
+		string outFile = imgPath.substr(0, imgPath.size() - 4) ;
+		int Idx=outFile.find_last_of("\\");
+		string imgName=outFile.substr(Idx+1,outFile.size()-Idx+1);
+		string foldName=outFile.substr(0, Idx + 1 )+ imgName;
+		_mkdir(foldName.c_str());
+		//foldName=foldName+"\\";
+		for (int i=0;i<arrTableFormResult.size();i++)
+		{
+			for (int j=0;j<arrTableFormResult[i].size();j++)
+			{
+				Mat segImg=src(Rect(arrTableFormResult[i][j].lef,arrTableFormResult[i][j].top,arrTableFormResult[i][j].rig-arrTableFormResult[i][j].lef,arrTableFormResult[i][j].bot-arrTableFormResult[i][j].top));
+				string segPath=foldName+"\\"+int2str(i)+int2str(j)+".jpg";
+				imwrite(segPath,segImg);
+			}
+		}
+
+#endif
+		DeleteCriticalSection(&cs);
+		fSum += (__time_end__ - __time_start__) / CLOCKS_PER_SEC * 1000;
+		nCnt += 1;
+	}
+
+	LOG(DEBUG) << "Average Time is " << fSum / nCnt;
+
+	fIvTableFormRecog_UnInit(handle);
+}
+
+void test_tableform_multiHandle(int argc, char* argv[]){
+
+	int nThreadNum = atoi(argv[1]);	/// 线程数
+	if (nThreadNum > 4 || nThreadNum <= 0) {
+		nThreadNum = 4;
+	}
+
+	string path = argv[2];			/// 待处理图像路径
+	vector<string> filePath;
+	readDirFrmFile(path, filePath);
+	if (filePath.size() == 0) {
+		readDirectory(path, filePath);
+	}
+	if (filePath.size() == 0) {
+		LOG(ERROR) << "输入路径有误，未找到相应图片";
+		return ;
+	}
+
+	long handle = fIvTableFormRecog_Init("");
+	//fIvTableFormRecog_SetQuality(handle, "", false);
+	if (handle <= 0) {
+		LOG(INFO) << "识别引擎加载失败！";
+		return;
+	}
+	
+	double begin_time = getCurSysTimeCount();
+	for (int i = 0; i < filePath.size(); i += nThreadNum) {
+		InitializeCriticalSection(&cs);
+		double t1 = getCurSysTimeCount();
+		for(int index_thread = 0; index_thread < nThreadNum; ++index_thread)	{
+			if (i + index_thread < filePath.size())	{
+				vecFormThreadParam[index_thread].handle = handle;
+				vecFormThreadParam[index_thread].imgFileName = (char*)filePath[i+index_thread].c_str();
+			}
+		}
+
+		for(int index_thread=0; index_thread<nThreadNum; ++index_thread)	{
+			threadHandle[index_thread] = (HANDLE)_beginthreadex(NULL, 0, TableFormFunc, &vecFormThreadParam[index_thread], 0, NULL);
+		}
+
+		WaitForMultipleObjects(nThreadNum, threadHandle, TRUE, INFINITE);
+		for(int index_thread=0; index_thread<nThreadNum; ++index_thread)	{
+			CloseHandle(threadHandle[index_thread]);
+		}
+
+		DeleteCriticalSection(&cs);
+		double t2 = getCurSysTimeCount();
+		LOG(INFO) << "Average Time is " << (t2 - t1) / getSysTimeFrequency() / nThreadNum;
+	}
+
+	double end_time = getCurSysTimeCount();
+	LOG(INFO) << "Average Time is " << (end_time - begin_time) / getSysTimeFrequency() / filePath.size();
+
+	fIvTableFormRecog_UnInit(handle);
+}
+
+typedef enum _tageCharType{
+	CHAR_NAN = -1,
+	CHAR_CHN = 0,
+	CHAR_NUM = 1,
+	CHAR_VAL = 2,
+}charType;
+
+charType judgeCharType(string str){
+	if (str.size() == 0) {
+		return CHAR_NAN;
+	}
+
+	string strNum = "0123456789";
+	string strDot = ".";
+
+	int nFindNum = 0;
+	for (int i = 0; i < str.size(); i++) {
+		if (strNum.find(str[i]) != string::npos){
+			nFindNum++;
+		}
+	}
+
+	/// 字符串中数字个数过少则为中文
+	if (nFindNum < str.size() * 0.5) {
+		return CHAR_CHN;
+	}
+
+	/// 数字串中有标点则为金额值，否则为序号
+	if (str.find(strDot) != string::npos) {
+		return CHAR_VAL;
+	}
+	else{
+		return CHAR_NUM;
+	}
+}
+
+charType judgeColType(vector<vector<int>> arrCharType, int colIdx){
+	if (arrCharType.size() == 0) {
+		return CHAR_NAN;
+	}
+	if (colIdx < 0 || colIdx >= arrCharType[0].size()) {
+		return CHAR_NAN;
+	}
+
+	int hist[3];
+	for (int i = 0; i < arrCharType.size(); i++) {
+		if (arrCharType[i][colIdx] >= 0) {
+			hist[arrCharType[i][colIdx]]++;
+		}
+	}
+
+	if (hist[0] > hist[1] && hist[0] > hist[2]) {
+		return CHAR_CHN;
+	}
+	else if (hist[1] > hist[0] && hist[1] > hist[2]) {
+		return CHAR_NUM;
+	}
+	else if (hist[2] > hist[0] && hist[2] > hist[1]){
+		return CHAR_VAL;
+	}
+	else{
+		return CHAR_NAN;
+	}
+}
+
+typedef struct _tagValMapChn{
+	string tit;
+	int idx;
+	int row;
+	int col;
+	float val;
+}stValMapChn;
+
+int matchStr(vector<stValMapChn> vValMapChn, string str){
+	if (vValMapChn.size() == 0) {
+		return -1;
+	}
+
+	if (str.size() == 0) {
+		return -1;
+	}
+	
+	int  nLabel = -1;
+	for (int i = 0; i < vValMapChn.size(); i++) {
+		if (!strcmp(str.c_str(), vValMapChn[i].tit.c_str())) {			
+			nLabel = i;
+			break;
+		}
+	}
+
+	return nLabel;
+}
+
+typedef enum{
+	FIV_CHK_OK = 0,
+	FIV_CHK_ERR_NO_MATCH = -1,
+	FIV_CHK_ERR_PARA = -2,
+}FIV_RET;
+FIV_RET fIvTableFormCheck(vector<stValMapChn> vValMapChn, vector<string> vStrDic, vector<int> vIntMul){
+	if (vStrDic.size() != vIntMul.size() || vStrDic.size() == 0 || vIntMul.size() == 0) {
+		return FIV_CHK_ERR_PARA;
+	}
+	if (vIntMul[0] < 0)	{
+		return FIV_CHK_ERR_PARA;
+	}
+
+	bool bChk = true;
+	for (int i = 0; i < vIntMul.size(); i++) {
+		if (abs(vIntMul[i]) != 1) {
+			bChk = false;
+			break;
+		}
+	}
+	if (bChk == false) {
+		return FIV_CHK_ERR_PARA;
+	}
+
+	vector<int> vLabel;
+	bool bAllMatch = true;
+	for (int i = 0; i < vStrDic.size(); i++) {
+		int nRet = matchStr(vValMapChn, vStrDic[i]);
+		if (nRet < 0) {
+			bAllMatch = false;
+			break;
+		}
+		vLabel.push_back(nRet);
+	}
+
+	if (!bAllMatch) {
+		return FIV_CHK_ERR_NO_MATCH;
+	}
+
+	float fLeft = vValMapChn[vLabel[0]].val * vIntMul[0];
+	float fRigh = 0.f;
+	for (int i = 1; i < vIntMul.size(); i++) {
+		fRigh += vValMapChn[vLabel[i]].val * vIntMul[i];
+	}
+	if (fLeft == fRigh)	{
+		return FIV_CHK_OK;
+	}
+	else{
+		return FIV_CHK_ERR_NO_MATCH;
+	}
+}
+
+
+void fIvTableForm_postProcess(vector<vector<iTableFormCell>>& arrTableFormResult){
+	if (arrTableFormResult.size() <= 10) {
+		return;
+	}
+
+	vector<int> vIntColNum;
+	vIntColNum.resize(arrTableFormResult.size());
+
+	for (int i = 0; i < arrTableFormResult.size(); i++) {
+		vIntColNum[i] = arrTableFormResult[i].size();
+	}
+	
+	bool bFlag = false;
+	for (int i = 0; i < vIntColNum.size() - 1; i++) {
+		if (vIntColNum[i] != vIntColNum[i + 1]) {
+			bFlag = true;
+			break;
+		}
+	}
+
+	/// 每一行的列数不一
+	if (bFlag) {
+		return;
+	}
+
+	/// 判断表单中各列的类型，中文-序号-金额
+	vector<vector<int>> arrCharType;
+	arrCharType.resize(arrTableFormResult.size());
+	for (int i = 0; i < arrTableFormResult.size(); i++) {
+		arrCharType[i].resize(arrTableFormResult[i].size());
+		for (int j = 0; j < arrTableFormResult[i].size(); j++) {
+			arrCharType[i][j] = judgeCharType(arrTableFormResult[i][j].str);
+		}
+	}
+
+	vector<int> vColType;
+	vColType.resize(arrCharType[0].size());
+	for (int i = 0; i < vColType.size(); i++) {
+		vColType[i] = judgeColType(arrCharType, i);
+	}
+
+	/// 生成对应关系映射图
+	vector<stValMapChn> vValMapChn;
+	int label = 0;
+	int title;
+	for (int col = 0; col < vColType.size(); col++) {
+		if (vColType[col] == CHAR_CHN) {
+			title = col;
+		}
+		if (vColType[col] != CHAR_VAL) {
+			continue;
+		}
+		label++;
+		
+		for (int row = 0; row < arrTableFormResult.size(); row++) {
+			if (arrCharType[row][col] != CHAR_VAL && arrCharType[row][col] != CHAR_NAN) {
+				continue;
+			}
+			else {
+				stValMapChn tmpVMC;
+				tmpVMC.col = col;
+				tmpVMC.row = row;
+				tmpVMC.idx = label;
+				tmpVMC.tit = arrTableFormResult[row][title].str;
+				tmpVMC.val = atof(arrTableFormResult[row][col].str.c_str());
+				vValMapChn.push_back(tmpVMC);
+			}
+		}
+	}
+	
+	/// 根据财务信息+对应关系映射图进行后处理
+	vector<vector<string>> arrStrDic;
+	vector<vector<int>> arrIntMul;
+	chkXml("../财务公式.xml", arrStrDic, arrIntMul);
+	
+	if (arrIntMul.size() != arrStrDic.size() || arrIntMul.size() == 0) {
+		return;
+	}
+
+	for (int i = 0; i < arrIntMul.size(); i++)	{
+		FIV_RET fivRet = fIvTableFormCheck(vValMapChn, arrStrDic[i], arrIntMul[i]);
+		if (fivRet == FIV_CHK_OK)		{
+			LOG(DEBUG) << "Matched!";
+		}
+		else{
+			LOG(ERROR) << "NoMatched!";
+		}
+	}
+	
+	///// <--------------------------------------------------1 资产负债表-------------------------------------------------->
+	//{	
+	//	/// 公式 1
+	//	/// (存货)=(原材料)+(在产品)+(库存商品)+(周转材料)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("存货");
+	//	vStrDic.push_back("原材料");
+	//	vStrDic.push_back("在产品");
+	//	vStrDic.push_back("库存商品");
+	//	vStrDic.push_back("周转材料");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 2
+	//	/// (流动资产合计)=(货币资金)+(短期投资)+(应收票据)+(应收账款)+(预付账款)+(应收股利)+(应收利息)+(其他应收款)+(存货)+(其他流动资产)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("流动资产合计");					
+	//	vStrDic.push_back("货币资金");					
+	//	vStrDic.push_back("短期投资");					
+	//	vStrDic.push_back("应收票据");					
+	//	vStrDic.push_back("应收账款");					
+	//	vStrDic.push_back("预付账款");					
+	//	vStrDic.push_back("应收股利");					
+	//	vStrDic.push_back("应收利息");					
+	//	vStrDic.push_back("其他应收款");					
+	//	vStrDic.push_back("存货");						
+	//	vStrDic.push_back("其他流动资产");				
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 3
+	//	/// (固定资产账面价值)=(固定资产)-(累计折旧)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("固定资产账面价值");
+	//	vStrDic.push_back("固定资产");
+	//	vStrDic.push_back("累计折旧");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 4
+	//	/// (非流动资产)=(长期债券投资)+(长期股权投资)+(固定资产账面价值)+(在建工程)+(工程物资)+(固定资产清理)+(生产性生物资产)+(无形资产)+(开发支出)+(长期待摊费用)+(其他非流动资产)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("非流动资产");
+	//	vStrDic.push_back("长期债券投资");
+	//	vStrDic.push_back("长期股权投资");
+	//	vStrDic.push_back("固定资产账面价值");
+	//	vStrDic.push_back("在建工程");
+	//	vStrDic.push_back("工程物资");
+	//	vStrDic.push_back("固定资产清理");
+	//	vStrDic.push_back("生产性生物资产");
+	//	vStrDic.push_back("无形资产");
+	//	vStrDic.push_back("开发支出");
+	//	vStrDic.push_back("长期待摊费用");
+	//	vStrDic.push_back("其他非流动资产");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{	
+	//	/// 公式 5
+	//	/// (资产总计)=(流动资产)+(非流动资产)=(固定资产合计)+(流动资产合计)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("资产总计");
+	//	vStrDic.push_back("流动资产");
+	//	vStrDic.push_back("非流动资产");
+	//	vStrDic.push_back("固定资产合计");
+	//	vStrDic.push_back("流动资产合计");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{	
+	//	/// 公式 6
+	//	/// (流动负债合计)=(短期借债)+(应付票据)+(应付账款)+(预收款项)+(应付职工薪酬)+(应交税费)+(应付利息)+(应付利润)+(其他应付款)+(其他流动负债)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("流动负债合计");
+	//	vStrDic.push_back("短期借债");
+	//	vStrDic.push_back("应付票据");
+	//	vStrDic.push_back("应付账款");
+	//	vStrDic.push_back("预收款项");
+	//	vStrDic.push_back("应付职工薪酬");
+	//	vStrDic.push_back("应交税费");
+	//	vStrDic.push_back("应付利息");
+	//	vStrDic.push_back("应付利润");
+	//	vStrDic.push_back("其他应付款");
+	//	vStrDic.push_back("其他流动负债");
+	//	
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{	
+	//	/// 公式 7
+	//	/// (非流动负债合计)=(长期借款)+(长期应付款)+(递延收益)+(其他非流动负债)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("非流动负债合计");
+	//	vStrDic.push_back("长期借款");
+	//	vStrDic.push_back("长期应付款");
+	//	vStrDic.push_back("递延收益");
+	//	vStrDic.push_back("其他非流动负债");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式8
+	//	/// (负债合计)=(流动负债合计)+(非流动负债合计)		
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("负债合计");
+	//	vStrDic.push_back("流动负债合计");
+	//	vStrDic.push_back("非流动负债合计");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 9
+	//	///	(所有者权益(或股东权益)合计)=(实收资本(或股本))+(资本公积)+(盈余公积)+(未分配利润)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("所有者权益(或股东权益)合计");
+	//	vStrDic.push_back("实收资本(或股本)");
+	//	vStrDic.push_back("资本公积");
+	//	vStrDic.push_back("盈余公积");
+	//	vStrDic.push_back("未分配利润");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 10
+	//	///	(负债和所有者权益(或股东权益)总计)=(负债合计)+(所有者权益(或股东权益)合计)
+	//	vector<string> vStrDic;
+	//	//vStrDic.push_back("所有者权益(或股东权益)合计");
+	//	//vStrDic.push_back("负债合计");
+	//	//vStrDic.push_back("所有者权益(或股东权益)合计");
+
+	//	vStrDic.push_back("负债及所有者权益");
+	//	vStrDic.push_back("负债合计");
+	//	vStrDic.push_back("所有者权益合计");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	///// <--------------------------------------------------2 利润表-------------------------------------------------->
+	//{
+	//	/// 公式 1
+	//	/// (营业税金及附加)=(城市建设维护税)+(教育费附加)+(地方教育费附加)+(城镇土地使用税)+(防洪费)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("营业税金及附加");
+	//	vStrDic.push_back("城市建设维护税");
+	//	vStrDic.push_back("教育费附加");
+	//	vStrDic.push_back("地方教育费附加");
+	//	vStrDic.push_back("城镇土地使用税");
+	//	vStrDic.push_back("防洪费");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 2
+	//	/// (营业利润)=(营业收入)-(营业成本)-(营业税金及附加)-(销售费用)-(管理费用)-(财务费用)+(投资收益)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("营业利润");
+	//	vStrDic.push_back("营业收入");
+	//	vStrDic.push_back("营业成本");
+	//	vStrDic.push_back("营业税金及附加");
+	//	vStrDic.push_back("销售费用");
+	//	vStrDic.push_back("管理费用");
+	//	vStrDic.push_back("财务费用");
+	//	vStrDic.push_back("投资收益");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 3
+	//	/// (利润总额)=(营业利润)+(营业外收入)-(营业外支出)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("利润总额");
+	//	vStrDic.push_back("营业利润");
+	//	vStrDic.push_back("营业外收入");
+	//	vStrDic.push_back("营业外支出");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{
+	//	/// 公式 4
+	//	/// (净利润)=(利润总额)-(所得税费用)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("净利润");
+	//	vStrDic.push_back("利润总额");
+	//	vStrDic.push_back("减：所得税");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	///// <--------------------------------------------------3 现金流量表-------------------------------------------------->
+	//{
+	//	/// 公式 1
+	//	/// (经营活动产生的现金流量净额)=(销售商品、提供劳务收到的现金)+(收到其他与经营活动有关的现金)
+	//	///							-(购买原材料商品、接受劳务支付的现金)-(支付给职工以及为职工支付的现金)-(支付的各项税费)-(支付其他与经营活动有关的现金)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("经营活动产生的现金流量净额");
+	//	vStrDic.push_back("销售商品、提供劳务收到的现金");
+	//	vStrDic.push_back("收到其他与经营活动有关的现金");
+	//	vStrDic.push_back("购买原材料商品、接受劳务支付的现金");
+	//	vStrDic.push_back("支付给职工以及为职工支付的现金");
+	//	vStrDic.push_back("支付的各项税费");
+	//	vStrDic.push_back("支付其他与经营活动有关的现金");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 2
+	//	/// (经营活动产生的现金流量净额)=(收回短期投资、长期债券投资和长期股权投资收到的现金)+(取得投资收益收到的现金)
+	//	///							-(处置固定资产、无形资产和其他长期资产收回的现金净额)-(短期投资、长期债券投资和长期股权投资支付的现金)-(构建固定资产、无形资产和其他非流动资产支付的现金)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("经营活动产生的现金流量净额");
+	//	vStrDic.push_back("收回短期投资、长期债券投资和长期股权投资收到的现金");
+	//	vStrDic.push_back("取得投资收益收到的现金");
+	//	vStrDic.push_back("处置固定资产、无形资产和其他长期资产收回的现金净额");
+	//	vStrDic.push_back("短期投资、长期债券投资和长期股权投资支付的现金");
+	//	vStrDic.push_back("构建固定资产、无形资产和其他非流动资产支付的现金");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 3
+	//	/// (筹资活动产生的现金流量净额)=(吸收投资收到的现金)+(取得借款收到的现金)–(偿还借款本金支付的现金)–(偿还借款利息支付的现金)–(分配利润支付的现金)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("筹资活动产生的现金流量净额");
+	//	vStrDic.push_back("吸收投资收到的现金");
+	//	vStrDic.push_back("取得借款收到的现金");
+	//	vStrDic.push_back("偿还借款本金支付的现金");
+	//	vStrDic.push_back("偿还借款利息支付的现金");
+	//	vStrDic.push_back("分配利润支付的现金");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 4
+	//	/// (现金及现金等价物净增加额)=(销售商品、提供劳务收到的现金)+( 经营活动产生的现金流量净额)+( 筹资活动产生的现金流量净额)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("现金及现金等价物净增加额");
+	//	vStrDic.push_back("销售商品、提供劳务收到的现金");
+	//	vStrDic.push_back("经营活动产生的现金流量净额");
+	//	vStrDic.push_back("筹资活动产生的现金流量净额");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 5
+	//	/// (期末现金及现金等价物余额)=(现金及现金等价物净增加额)+(加：期初现金及现金等价物余额)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("期末现金及现金等价物余额");
+	//	vStrDic.push_back("现金及现金等价物净增加额");
+	//	vStrDic.push_back("期初现金及现金等价物余额");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+}
+
+bool chkXml(string xmlPath, vector<vector<string>>& arrStrDic, vector<vector<int>> & arrIntMul){
+	TiXmlDocument myDocument(xmlPath.c_str());
+	bool bSucess = myDocument.LoadFile();
+	if (!bSucess) {
+		LOG(ERROR) << "Open Input Model Form XML File Failed!";
+		return false;
+	}
+
+	TiXmlElement* modelElement = myDocument.RootElement();  //Model
+	if (!modelElement) {
+		return false;
+	}
+
+	/// 资产负债表公式解析
+	TiXmlElement* fieldsElement = modelElement->FirstChildElement("financialState"); //financialState
+	if (!fieldsElement) {
+		return false;
+	}
+	TiXmlElement* field = fieldsElement->FirstChildElement(); 
+	if (field == NULL){
+		return false;
+	}
+
+	while (NULL != field){		
+		vector<string> vStrDic;
+		vector<int> vIntMul;
+
+		TiXmlElement* f = field->FirstChildElement();	
+		if (NULL == f) {
+			break;
+		}
+
+		/// 读取公式
+		while (NULL != f) {
+			/// string
+			const char *pValue = f->GetText();
+			vStrDic.push_back(string(pValue));
+			f = f->NextSiblingElement();
+
+			/// factor
+			pValue = f->GetText();
+			vIntMul.push_back(atoi(pValue));
+			f = f->NextSiblingElement();
+		}
+
+		arrStrDic.push_back(vStrDic);
+		arrIntMul.push_back(vIntMul);
+		field = field->NextSiblingElement();
+	}
+
+	/// 利润表公式解析
+	fieldsElement = modelElement->FirstChildElement("profitState");
+	if (!fieldsElement) {
+		return false;
+	}
+	field = fieldsElement->FirstChildElement();
+	if (field == NULL){
+		return false;
+	}
+	while (NULL != field){
+		vector<string> vStrDic;
+		vector<int> vIntMul;
+
+		TiXmlElement* f = field->FirstChildElement();
+		if (NULL == f) {
+			break;
+		}
+
+		/// 读取公式
+		while (NULL != f){
+			/// string
+			const char *pValue = f->GetText();
+			vStrDic.push_back(string(pValue));
+			f = f->NextSiblingElement();
+
+			/// factor
+			pValue = f->GetText();
+			vIntMul.push_back(atoi(pValue));
+			f = f->NextSiblingElement();
+		}
+
+		arrStrDic.push_back(vStrDic);
+		arrIntMul.push_back(vIntMul);
+		field = field->NextSiblingElement();
+	}
+
+	/// 现金流量表
+	fieldsElement = modelElement->FirstChildElement("cashFlow");
+	if (!fieldsElement) {
+		return false;
+	}
+	field = fieldsElement->FirstChildElement();
+	if (field == NULL){
+		return false;
+	}
+	while (NULL != field){
+		vector<string> vStrDic;
+		vector<int> vIntMul;
+
+		TiXmlElement* f = field->FirstChildElement();
+		if (NULL == f) {
+			break;
+		}
+
+		/// 读取公式
+		while (NULL != f){
+			/// string
+			const char *pValue = f->GetText();
+			vStrDic.push_back(string(pValue));
+			f = f->NextSiblingElement();
+
+			/// factor
+			pValue = f->GetText();
+			vIntMul.push_back(atoi(pValue));
+			f = f->NextSiblingElement();
+		}
+		arrStrDic.push_back(vStrDic);
+		arrIntMul.push_back(vIntMul);
+		field = field->NextSiblingElement();
+	}
+}

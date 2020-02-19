@@ -1,0 +1,9 @@
+#ifndef _ICV_CALC_FORM_FTR_H_
+#define _ICV_CALC_FORM_FTR_H_
+
+#include "icvTemplateInfo.h"
+
+int icvCalcFormInfo(Mat& Image,vector<std::vector<float>>& barcodelines,vector<FormInfo>& CFromIfos,Point2f& ReferPoint,float& sinA);
+
+
+#endif

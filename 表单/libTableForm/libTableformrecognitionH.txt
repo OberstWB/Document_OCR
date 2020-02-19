@@ -1,0 +1,91 @@
+/***************************************************************************************************
+ *	功能简介：通用表单识别算法，包含table和form两种。可以进行先验输入进行识别，亦可自动判断类型并进行识别
+ *	创建作者：wangbo
+ *	创建时间：2018-04-18
+ *	版本编号：V0.0.0.1
+ **************************************************************************************************/
+#pragma once
+#ifdef LIBTABLEFORMRECOGNITION_EXPORTS
+#define DLL_API extern __declspec(dllexport)
+#else
+#define DLL_API extern __declspec(dllimport)
+#endif
+
+/// <==========================================================================================> ///
+/// 域识别信息，包含坐标信息，识别结果以及置信度
+typedef struct _tagTableFormCell{
+	int top;
+	int lef;
+	int bot;
+	int rig;
+	string str;
+	float dcf;
+}iTableFormCell;
+
+/// 算法返回值，根据返回值判断算法内部的处理现状
+enum{
+	TABLE_RET_OK			= 1,		/// <正确识别>
+	TABLE_RET_ERR_MODEL		= -1,		/// <模型加载失败>
+	TABLE_RET_ERR_HANDLE    = -2,		/// <引擎句柄异常>
+	TABLE_RET_ERR_IMG_PATH	= -3,		/// <识别图像路径异常>
+	TABLE_RET_ERR_IMG_DATA	= -4,		/// <识别图像数据流异常>
+	TABLE_RET_ERR_IMG_MAT	= -5,		/// <mat 为空>
+	TABLE_RET_ERR_QUALITY	= -6,		/// <图像质量异常>	
+};
+
+/// 表单类型
+typedef enum{
+	UNKNOWN = 0,		/// <可设置，先进行框线有无判断，如果无框线，则调用4，有框线则调用1>
+	FORM_NORM = 1,		/// <可设置，有框线财报算法>
+	FORM_ANY = 2,		/// <目前同1>
+	TABLE = 4,			/// <可设置，无框线财报算法>
+}iTableFormType;
+
+/// <==========================================================================================> ///
+/// 表单识别引擎初始化(这里输入的是模型文件路径,默认使用质量评判+文字矫正)
+DLL_API long fIvTableFormRecog_Init(string modelPath);
+
+/// 文字校对功能开关(这里输入的是字典文件的路径)
+DLL_API int  fIvTableFormRecog_SetTextDic(long& handle, string modelPath, bool bUse = true);
+
+/// 质量评判开关(这里输入的质量评判配置文件的路径)
+DLL_API int  fIvTableFormRecog_SetQuality(long& handle, string modelPath, bool bUse = true);
+
+/// 文字方向校对开关
+DLL_API int  fIvTableFormRecog_SetTextDir(long& handle, bool bUse = true);
+
+/// 表单识别引擎释放
+DLL_API void fIvTableFormRecog_UnInit(long& handle);
+
+/// 基于路径的表单识别
+DLL_API int  fIvTableFormRecog_path(long handle, string imgPath, vector<iTableFormCell>& vTableFormResult, iTableFormType iType = iTableFormType::UNKNOWN);
+DLL_API int  fIvTableFormRecog_path(long handle, string imgPath, vector<vector<iTableFormCell>>& arrTableFormResult);
+
+/// 基于数据流的表单识别
+DLL_API int  fIvTableFormRecog_data(long handle, char* data, int nLen, vector<iTableFormCell>& vTableFormResult, iTableFormType iType = iTableFormType::UNKNOWN);
+DLL_API int  fIvTableFormRecog_data(long handle, char* data, int nLen, vector<vector<iTableFormCell>>& arrTableFormResult);
+
+/// 基于opencv中Mat的表单识别
+DLL_API int  fIvTableFormRecog_mat(long handle, Mat img, vector<iTableFormCell>& vTableFormResult, iTableFormType iType = iTableFormType::UNKNOWN);
+DLL_API int  fIvTableFormRecog_mat(long handle, Mat img, vector<vector<iTableFormCell>>& arrTableFormResult);
+
+/// 根据财务公式对财务报表算法进行后处理机制(提升可靠性，意义不大，暂不开放-20170704)
+DLL_API void fIvTableFormRecog_postProcess(vector<vector<iTableFormCell>>& arrTableFormResult);
+
+/////针对已有单元格切片直接送入识别的情况
+/////其中第一个参数ocr需要事先设定一下为   long(iTableFormEngine*)类型，其中的lOcrHandle赋值为LineSegAndRecog_Init的返回值，其余句柄为原始值即可
+//
+//DLL_API void cellLineOCR(long ocr,Mat grayImg, iTableFormCell& cellResult);
+
+
+/// <==========================================================================================> ///
+/// 自包含lib文件，防止出现lib未包含错误。
+#ifndef LIBTABLEFORMRECOGNITION_EXPORTS
+#ifdef _DEBUG
+#pragma comment(lib, "libTableFormRecognitionD.lib")
+#else
+#pragma comment(lib, "libTableFormRecognition.lib")
+#endif
+#endif
+
+/// <==========================================================================================> ///

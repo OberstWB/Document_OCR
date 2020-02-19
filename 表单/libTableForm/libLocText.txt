@@ -1,0 +1,2515 @@
+#include "stdafx.h"
+#include "libLocText.h"
+#include "libThresh.h"
+#include "tpCon.h"
+#include "libSkew.h"
+//#include "libLineExtract.h"
+
+float getRectStd(Mat bw, bool bWdith = true)
+{
+	if (bw.empty())
+	{
+		return -1;
+	}
+
+	vector<vector<Point>> contours;
+	findContours(bw.clone(), contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+	vector<int> vInt;
+	if (bWdith)
+	{
+		for (int i = 0; i < contours.size(); i++)
+		{
+			vInt.push_back(boundingRect(contours[i]).width);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < contours.size(); i++)
+		{
+			vInt.push_back(boundingRect(contours[i]).height);
+		}
+	}
+
+	return getStd(vInt);
+}
+
+bool CheckIfSameRow(Rect a, Rect b)
+{
+	int nHeight = std::min(a.height, b.height);
+	int nOverLap = std::min(a.y + a.height, b.y + b.height) - std::max(a.y, b.y);
+
+	if (nOverLap > nHeight * 0.6)
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+// 通过与已有的方框位置进行对比来判定b是否属于vecArray所在行。这种方式可以在一定程度上降低倾斜产生的影响。
+bool CheckIfSameRow(vector<Rect> vecArray, Rect b)
+{
+	int nThres = vecArray[0].width / 2;
+	// find the nearest col
+	bool bFlag = false;
+	int nIndex = -1;
+	for (int i = 0; i < vecArray.size();i++)
+	{
+		if (abs(vecArray[i].x - b.x) < nThres)
+		{
+			bFlag = true;
+			nIndex = i;
+		}
+	}
+
+	if (bFlag)
+	{
+		return CheckIfSameRow(vecArray[nIndex], b);
+	}
+	else
+	{
+		return CheckIfSameRow(vecArray[vecArray.size() - 1], b);
+	}
+}
+
+bool sortRectTopLeft(Rect a, Rect b)
+{
+	if (abs(a.y - b.y) > int((a.height + b.height)/2 * 0.75))
+	{
+		return a.y < b.y;
+	}
+	else
+	{
+		return a.x < b.x;
+	}
+}
+
+void getTopAndBot(Mat localImg, int& nTop, int& nBot)
+{
+	if (localImg.empty())
+	{
+		nTop = -1;
+		nBot = -1;
+		return;
+	}
+
+	bool bFlag = false;
+
+	for (int row = 0; row < localImg.rows; row++)
+	{				
+		for (int col = 0; col < localImg.cols; col++)
+		{
+			if (localImg.at<uchar>(row, col) == 255)
+			{
+				nTop = row;
+				bFlag = true;
+				break;
+			}
+		}
+
+		if (bFlag)
+		{
+			break;
+		}
+	}
+
+	bFlag = false;
+	for (int row = localImg.rows - 1; row >= 0; row--)
+	{
+		for (int col = 0; col < localImg.cols; col++)
+		{
+			if (localImg.at<uchar>(row, col) == 255)
+			{
+				nBot = row;
+				bFlag = true;
+				break;
+			}
+		}
+
+		if (bFlag)
+		{
+			break;
+		}
+	}
+}
+
+bool sortVRectLeftTop(vector<Rect> a, vector<Rect> b){
+	if (abs(a[0].x - b[0].x) < (a[0].width + b[0].width) * 0.2){
+		return a[0].y < b[0].y;
+	}
+	else{
+		return a[0].x < b[0].x;	
+	}
+}
+
+bool sort_rect_by_y_center(const Rect a, const Rect b)
+{
+	return (a.y + a.height) < (b.y + b.height);
+}
+
+bool sort_rect_by_x_center(const Rect a, const Rect b)
+{
+	return (a.x + a.width) < (b.x + b.width);
+}
+
+/// 按照面积大小对轮廓进行排序
+bool sort_contours_area(const vector<Point> &a,const vector<Point> &b)
+{
+	Rect rectA = boundingRect(a);
+	Rect rectB = boundingRect(b);
+
+	return rectA.area() > rectB.area();
+}
+
+namespace iLocText{
+	// 切片边界填充
+	void fillEdge(Mat &roiGray, Mat refFill)
+	{
+		for (int i = 0; i < roiGray.rows; i++)
+		{
+			for (int j = 0; j < roiGray.cols; j++)
+			{
+				if (refFill.at<uchar>(i,j) == 255)
+				{
+					roiGray.at<uchar>(i,j) = 255;
+				}
+			}
+		}
+	}
+
+	void fillEdge(Mat& bwImg){
+		if (bwImg.empty())
+		{
+			return;
+		}
+
+		int nHeight = bwImg.rows;
+		int nWidth  = bwImg.cols;
+		for (int i = 0; i < nHeight; i++)
+		{
+			/// left
+			int j = 0;
+			for (; j < nWidth; j++)
+			{
+				if (bwImg.at<uchar>(i,j))
+				{
+					bwImg.at<uchar>(i,j) = 0;
+				}
+				else
+				{
+					break;
+				}
+			}
+
+			if (j == nWidth)
+			{
+				continue;
+			}
+
+			/// right
+			j = nWidth - 1;
+			for (; j >= 0; j--)
+			{
+				if (bwImg.at<uchar>(i,j))
+				{
+					bwImg.at<uchar>(i,j) = 0;
+				}
+				else
+				{
+					break;
+				}
+			}
+		}
+
+		for (int j = 0; j < nWidth; j++)
+		{
+			/// top
+			int i = 0; 
+			for (; i < nHeight; i++)
+			{
+				if (bwImg.at<uchar>(i,j))
+				{
+					bwImg.at<uchar>(i,j) = 0;
+				}
+				else
+				{
+					break;
+				}
+			}
+
+			/// bot
+			i = nHeight - 1;
+			for (; i >= 0; i--)
+			{
+				if (bwImg.at<uchar>(i,j))
+				{
+					bwImg.at<uchar>(i,j) = 0;
+				}
+				else
+				{
+					break;
+				}
+			}
+		}
+	}
+
+	//void grayFillEdge(Mat& gray){
+	//	if (gray.empty())
+	//	{
+	//		return;
+	//	}
+
+	//	int nHeight = gray.rows;
+	//	int nWidth  = gray.cols;
+	//	for (int i = 0; i < nHeight; i++)
+	//	{
+	//		/// left
+	//		int j = 0;
+	//		for (; j < nWidth; j++)
+	//		{
+	//			if (gray.at<uchar>(i,j)<=200)
+	//			{
+	//				gray.at<uchar>(i,j) = 255;
+	//			}
+	//			else
+	//			{
+	//				break;
+	//			}
+	//		}
+
+	//		if (j == nWidth)
+	//		{
+	//			continue;
+	//		}
+
+	//		/// right
+	//		j = nWidth - 1;
+	//		for (; j >= 0; j--)
+	//		{
+	//			if (gray.at<uchar>(i,j)<=200)
+	//			{
+	//				gray.at<uchar>(i,j) = 255;
+	//			}
+	//			else
+	//			{
+	//				break;
+	//			}
+	//		}
+	//	}
+
+	//	for (int j = 0; j < nWidth; j++)
+	//	{
+	//		/// top
+	//		int i = 0; 
+	//		for (; i < nHeight; i++)
+	//		{
+	//			if (gray.at<uchar>(i,j)<=200)
+	//			{
+	//				gray.at<uchar>(i,j) = 255;
+	//			}
+	//			else
+	//			{
+	//				break;
+	//			}
+	//		}
+
+	//		/// bot
+	//		i = nHeight - 1;
+	//		for (; i >= 0; i--)
+	//		{
+	//			if (gray.at<uchar>(i,j)<=200)
+	//			{
+	//				gray.at<uchar>(i,j) = 255;
+	//			}
+	//			else
+	//			{
+	//				break;
+	//			}
+	//		}
+	//	}
+	//}
+
+	void grayFillEdge(Mat& gray){///四个边界填充宽度有限定宽度
+		if (gray.empty())
+		{
+			return;
+		}
+
+		int nHeight = gray.rows;
+		int nWidth  = gray.cols;
+		int pad = 2;
+		Mat lefBorder,rigBorder,topBorder,botBorder;
+		Rect lefRc,rigRc,topRc,botRc;
+		lefRc.x = 0; lefRc.y = 0; lefRc.width = pad; lefRc.height = nHeight;
+		rigRc.x = nWidth - pad; rigRc.y = 0; rigRc.width = pad; rigRc.height = nHeight;
+		topRc.x = 0; topRc.y = 0; topRc.width = nWidth; topRc.height = pad;
+		botRc.x = 0; botRc.y = nHeight - pad; botRc.width = nWidth; botRc.height = pad;
+		lefBorder = gray(lefRc);
+		rigBorder = gray(rigRc);
+		topBorder = gray(topRc);
+		botBorder = gray(botRc);
+		for (int i = 0; i < nHeight; i++)
+		{
+			/// left
+			int j = 0;
+			for (; j < pad; j++)
+			{
+				if (lefBorder.at<uchar>(i,j)<=220)
+				{
+					lefBorder.at<uchar>(i,j) = 255;
+					continue;
+				}
+				else
+				{
+					break;
+				}
+			}
+			/*	if (j == nWidth)
+			{
+			continue;
+			}*/
+
+			/// right
+			j = pad-1;
+			for (; j >= 0; j--)
+			{
+				if (rigBorder.at<uchar>(i,j)<=220)
+				{
+					rigBorder.at<uchar>(i,j) = 255;
+					continue;
+				}
+				else
+				{
+					break;
+				}
+			}
+		
+				
+		}
+
+		for (int m = 0; m < nWidth; m++)
+		{
+			/// top
+			int n = 0; 
+			for (; n < pad; n++)
+			{
+
+				if (topBorder.at<uchar>(n,m)<=220)
+				{
+					topBorder.at<uchar>(n,m) = 255;
+					continue;
+				}
+				else
+				{
+					break;
+				}
+			}
+
+			/// bot
+			n = pad - 1;
+			for (; n >= 0; n--)
+			{
+				if (botBorder.at<uchar>(n,m)<=220)
+				{
+					botBorder.at<uchar>(n,m) = 255;
+					continue;
+				}
+				else
+				{
+					break;
+				}
+				
+			}
+		}
+		lefBorder.copyTo(gray(lefRc));
+		rigBorder.copyTo(gray(rigRc));
+		topBorder.copyTo(gray(topRc));
+		botBorder.copyTo(gray(botRc));
+	}
+	/// 计算列方向直方图
+	void calcColHist(Mat bwImg, vector<int>& colHist)
+	{
+		if (bwImg.empty() || bwImg.type() != CV_8UC1)
+		{
+			return;
+		}
+
+		colHist.clear();
+		colHist.resize(bwImg.cols);
+
+		for (int i = 0; i < bwImg.cols; i++)
+		{
+			colHist[i] = sum(bwImg.col(i)).val[0] / 255;
+		}
+	}
+
+	/// 计算行方向直方图
+	void calcRowHist(Mat bwImg, vector<int>& rowHist)
+	{
+		if (bwImg.empty() || bwImg.type() != CV_8UC1)
+		{
+			return;
+		}
+
+		rowHist.clear();
+		rowHist.resize(bwImg.rows);
+
+		for (int i = 0; i < bwImg.rows; i++)
+		{
+			rowHist[i] = sum(bwImg.row(i)).val[0] / 255;
+		}
+	}
+	
+	/// 根据阈值划分直方图，直方图在进行划分之前最好是进行一次平滑，减小间隙干扰
+	void segHist(vector<int> vecHist, float fThresh, vector<SegPart>& vSegPart)
+	{
+		if (vecHist.empty() || fThresh < 0 || fThresh > 1)
+		{
+			return;
+		}
+
+		vector<int>::const_iterator pos = max_element(vecHist.begin(), vecHist.end());
+		float fRef = (*pos) * fThresh;
+
+		bool flag = false;
+		int nStart = 0, nEnd = 0;
+		for (int i = 0; i < vecHist.size(); i++)
+		{
+			if (!flag)
+			{
+				if (vecHist[i] > fRef)
+				{
+					nStart = i;
+					flag = true;
+				}
+			}
+			else
+			{
+				if (vecHist[i] <= fRef)
+				{
+					nEnd = i;
+					flag = false;
+
+					vSegPart.push_back(SegPart(nStart, nEnd));
+				}
+			}
+		}
+
+		if (flag)
+		{
+			vSegPart.push_back(SegPart(nStart, vecHist.size() - 1));
+		}
+	}
+	
+	void colLinesExtract(Mat src,Rect rc,Mat& colsImg,vector<Rect>& colLineRegions)
+	{
+		if (src.empty())
+		{
+			LOG(INFO)<<"INPUT ERROR";
+			return;
+		}
+		if (src.channels()>1)
+		{
+			Mat tmp;
+			cvtColor(src,tmp,CV_RGB2GRAY);
+			tmp.assignTo(src);
+		}
+		double colProjRatio=rc.height<0.5*rc.width?0.5:0.2;
+		Mat tmpBw=Mat::zeros(src.size(),CV_8UC1);
+		src(rc).copyTo(tmpBw(rc));
+		vector<int> colSum;
+		vector<int> rowSum;
+		colSum.resize(tmpBw.cols);
+		rowSum.resize(tmpBw.rows);
+		//vector<Rect> colLineRegions;
+		colsImg=Mat::zeros(src.size(),CV_8UC1);
+		bool bStartFind=false;
+		int start,end;
+		for(int i=0;i<tmpBw.cols;i++)
+		{
+			colSum[i]=(int)sum(tmpBw.col(i))[0];
+			colSum[i]=colSum[i]/255;
+			if (!bStartFind&&colSum[i]>tmpBw(rc).rows*colProjRatio)
+			{
+				bStartFind=true;
+				start=i;
+				continue;
+			}
+			if(bStartFind&&colSum[i]<=tmpBw(rc).rows*colProjRatio)
+			{
+				end=i-1;
+				//Mat test=src(Rect(start,0,end-start,src.rows)).clone();
+				bStartFind=false;
+				int top,bottom;
+				bool bTopFind=false;
+				if (start==end)
+				{
+					continue;
+				}
+				rowSum[0]=(int)sum(tmpBw(Rect(start,0,abs(end-start),tmpBw.rows)).row(0))[0];
+				rowSum[0]=rowSum[0]/255;
+				//Mat test=src(Rect(start,0,end-start,src.rows)).clone();
+				for(int j=1;j<tmpBw.rows;j++)
+				{
+					
+					rowSum[j]=(int)sum(tmpBw(Rect(start,0,end-start,tmpBw.rows)).row(j))[0];
+					//Mat test=src(Rect(start,0,end-start,src.rows)).clone();
+					rowSum[j]=rowSum[j]/255;
+					if (!bTopFind&&rowSum[j-1]<=abs(end-start)*0.1&&rowSum[j]>abs(end-start)*0.1)
+					{
+						bTopFind=true;
+						top=j;
+						continue;
+					}
+					if (bTopFind&&(rowSum[j-1]>abs(end-start)*0.1)&&(rowSum[j]<=abs(end-start)*0.1))
+					{
+						bottom=j;
+						bTopFind=false;
+						if (abs(bottom-top)>0.02*rc.height)
+						{
+							colLineRegions.push_back(Rect(start,top,abs(end-start),abs(bottom-top)));
+						}
+						else
+						{
+							continue;
+						}
+					}
+				}
+			}
+		}
+		for(int k=0;k<colLineRegions.size();k++)
+		{
+			tmpBw(colLineRegions[k]).copyTo(colsImg(colLineRegions[k]));
+		}
+	}
+	
+	//表格线段提取后抽取行格线
+	void rowLinesExtract(Mat src,Rect rc,Mat& rowsImg,vector<Rect>& rowLineRegions)
+	{
+		if (src.empty())
+		{
+			LOG(INFO)<<"INPUT ERROR";
+			return;
+		}
+		if (src.channels()>1)
+		{
+			Mat tmp;
+			cvtColor(src,tmp,CV_RGB2GRAY);
+			tmp.assignTo(src);
+		}
+
+		Mat tmpBw=Mat::zeros(src.size(),CV_8UC1);
+		src(rc).copyTo(tmpBw(rc));
+		vector<int> colSum;
+		vector<int> rowSum;
+		colSum.resize(tmpBw.cols);
+		rowSum.resize(tmpBw.rows);
+		//vector<Rect> rowLineRegions;
+		rowsImg=Mat::zeros(tmpBw.size(),CV_8UC1);
+
+		bool bStartFind=false;
+		int start,end;
+		for(int i=0;i<tmpBw.rows;i++)
+		{
+			rowSum[i]=(int)sum(tmpBw.row(i))[0];
+			rowSum[i]=rowSum[i]/255;
+			if (!bStartFind&&rowSum[i]>tmpBw(rc).cols*0.4)
+			{
+				bStartFind=true;
+				start=i;
+				continue;
+			}
+			if(bStartFind&&rowSum[i]<=tmpBw(rc).cols*0.4)
+			{
+				end=i-1;
+				bStartFind=false;
+				int left,right;
+				bool bLeftFind=false;
+				colSum[0]=(int)sum(tmpBw(Rect(0,start,tmpBw.cols,end-start)).col(0))[0];
+				colSum[0]=colSum[0]/255;
+				for(int j=1;j<tmpBw.cols;j++)
+				{
+					colSum[j]=(int)sum(tmpBw(Rect(0,start,tmpBw.cols,end-start)).col(j))[0];
+					colSum[j]=colSum[j]/255;
+					if (!bLeftFind&&colSum[j-1]<=abs(end-start)*0.1&&colSum[j]>abs(end-start)*0.1)
+					{
+						bLeftFind=true;
+						left=j;
+						continue;
+					}
+					if (bLeftFind&&(colSum[j-1]>abs(end-start)*0.1)&&(colSum[j]<=abs(end-start)*0.1))
+					{
+						right=j;
+						bLeftFind=false;
+						if (abs(right-left)>0.1*rc.width)
+						{
+							rowLineRegions.push_back(Rect(left,start,right-left,end-start));
+						}
+						else
+						{
+							continue;
+						}
+					}
+				}
+			}
+		}
+		for(int k=0;k<rowLineRegions.size();k++)
+		{
+			tmpBw(rowLineRegions[k]).copyTo(rowsImg(rowLineRegions[k]));
+		}
+
+	}
+	void mypolyfit(const Mat& src_x, const Mat& src_y, Mat& dst, int order)
+	{
+		CV_Assert((src_x.rows > 0) && (src_y.rows > 0) && (src_x.cols == 1) && (src_y.cols == 1) && (order >= 1));
+
+		Mat X = Mat::zeros(src_x.rows, order + 1,CV_32FC1), copy;
+
+		for(int i = 0; i <= order;i++)
+		{
+			copy = src_x.clone();
+			pow(copy,i,copy);
+			copy.col(0).copyTo(X.col(i));
+		}
+
+		Mat X_t,  temp2, temp3;
+		transpose(X, X_t);	
+		invert(X_t * X, temp2);
+		dst = temp2 * X_t * src_y;
+	}
+	//形态学提取列线后去除伪列线
+	void removeMorphErrColLine(Mat& morphColLinesImg,Rect externalFrame)
+	{
+		vector<vector<Point> > contours;
+		findContours(morphColLinesImg.clone(),contours,CV_RETR_CCOMP,CV_CHAIN_APPROX_NONE);
+		for (int i=0;i<contours.size();i++)
+		{
+			Rect tRc=boundingRect(contours[i]);
+			if(tRc.height<0.1*max(externalFrame.height,externalFrame.width))
+			{
+				morphColLinesImg(tRc)=0;
+			}
+		}
+	}
+	//形态学提取行线后去除伪行线
+	void removeMorphErrRowLine(Mat& morphRowLinesImg,Rect externalFrame)
+	{
+		vector<vector<Point> > contours;
+		findContours(morphRowLinesImg.clone(),contours,CV_RETR_CCOMP,CV_CHAIN_APPROX_NONE);
+		for (int i=0;i<contours.size();i++)
+		{
+			Rect tRc=boundingRect(contours[i]);
+			if(tRc.width<0.1*max(externalFrame.height,externalFrame.width))
+			{
+				morphRowLinesImg(tRc)=0;
+			}
+		}
+	}
+	// 对列格线采用直线拟合的方式进行断裂修补
+	void repairTableColLine(Mat &ColTable, int nTop, int nBottom, int nLeft, int nRight)
+	{
+		Mat tmp = ColTable.clone();
+		Mat tmpLine = Mat::zeros(tmp.rows, tmp.cols, CV_8UC1);
+
+		int nCandi = 1;
+		int nRadius = 7;
+
+		for (int i = nTop; i < nBottom; i++)
+		//for (int i = nBottom; i >= nTop; i--)
+		{
+			for (int j = nLeft; j < nRight; j++)
+			{
+				if (tmp.at<uchar>(i,j) == 255)
+				{
+					vector<int> vecLineX;
+					vector<int> vecLineY;
+					int nPreCol = j;
+					int nRowTmp = i;
+					int nSum = 0;
+					int nCnt = 0;
+
+					while (nRowTmp >= nTop)
+					{
+						nSum = 0;
+						nCnt = 0;
+						if (tmp.at<uchar>(nRowTmp, nPreCol) == 255)
+						{
+							vecLineX.push_back(nRowTmp);
+							vecLineY.push_back(nPreCol);
+							tmp.at<uchar>(nRowTmp, nPreCol) = nCandi;
+							nSum += nPreCol;
+							nCnt++;
+						}
+
+						for (int k = 1; k < nRadius; k++)
+						{
+							if (nPreCol - k >= 0 && tmp.at<uchar>(nRowTmp, nPreCol - k) == 255)
+							{
+								vecLineX.push_back(nRowTmp);
+								vecLineY.push_back(nPreCol - k);
+								tmp.at<uchar>(nRowTmp, nPreCol - k) = nCandi;
+								nSum += nPreCol - k;
+								nCnt++;
+							}
+
+							if (nPreCol + k < tmp.cols && tmp.at<uchar>(nRowTmp, nPreCol + k) == 255)
+							{
+								vecLineX.push_back(nRowTmp);
+								vecLineY.push_back(nPreCol + k);
+								tmp.at<uchar>(nRowTmp, nPreCol + k) = nCandi;
+								nSum += nPreCol + k;
+								nCnt++;
+							}
+						}
+
+						if (nCnt)
+						{
+							nPreCol = nSum * 1.0 / nCnt + 0.5;
+						}
+
+						nRowTmp--;
+					}
+
+					nRowTmp = i;
+					nPreCol = j;
+					while (nRowTmp < nBottom)
+					{
+						nSum = 0;
+						nCnt = 0;
+						if (tmp.at<uchar>(nRowTmp, nPreCol) == 255)
+						{
+							vecLineX.push_back(nRowTmp);
+							vecLineY.push_back(nPreCol);
+							tmp.at<uchar>(nRowTmp, nPreCol) = nCandi;
+							nSum += nPreCol;
+							nCnt++;
+						}
+
+						for (int k = 1; k < nRadius; k++)
+						{
+							if (nPreCol - k >= 0 && tmp.at<uchar>(nRowTmp, nPreCol - k) == 255)
+							{
+								vecLineX.push_back(nRowTmp);
+								vecLineY.push_back(nPreCol - k);
+								tmp.at<uchar>(nRowTmp, nPreCol - k) = nCandi;
+								nSum += nPreCol - k;
+								nCnt++;
+							}
+
+							if (nPreCol + k < tmp.cols && tmp.at<uchar>(nRowTmp, nPreCol + k) == 255)
+							{
+								vecLineX.push_back(nRowTmp);
+								vecLineY.push_back(nPreCol + k);
+								tmp.at<uchar>(nRowTmp, nPreCol + k) = nCandi;
+								nSum += nPreCol + k;
+								nCnt++;
+							}
+						}
+
+						if (nCnt)
+						{
+							nPreCol = nSum * 1.0 / nCnt + 0.5;
+						}
+
+						nRowTmp++;
+					}
+
+					sort(vecLineX.begin(), vecLineX.end());
+					if (abs(vecLineX[0] - vecLineX[vecLineX.size() - 1]) < (nBottom - nTop) * 0.6)
+					{
+						for (int k = 0; k < vecLineX.size(); k++)
+						{
+							tmp.at<uchar>(vecLineX[k], vecLineY[k]) = 0;
+						}
+
+						continue;
+					}
+
+					Mat srcX = Mat::zeros(vecLineX.size(), 1, CV_32FC1);
+					Mat srcY = Mat::zeros(vecLineY.size(), 1, CV_32FC1);
+					Mat dst;
+
+					for (int k = 0; k < vecLineX.size(); k++)
+					{
+						srcX.at<float>(k,0) = vecLineX[k];
+						srcY.at<float>(k,0) = vecLineY[k];
+					}
+
+					mypolyfit(srcX, srcY, dst, 1);
+					float k = dst.at<float>(1,0);
+					float b = dst.at<float>(0,0);
+
+					for (int row = nTop; row < nBottom; row++)
+					{
+						int nCol = k * row + b + 0.5;
+						if (nCol < max(nLeft - 20,0) || nCol > min(nRight + 20, tmp.cols - 1)/* || nCol < 2 || nCol >= tmp.cols - 2*/)	/// 允许存在一定的偏差
+						{
+							continue;
+						}
+
+						// 原来方式存在问题：因为列格线断裂导致格线修补后仍然不能连起来；现改为拟合曲线附近直接填充。
+						tmp.at<uchar>(row, nCol - 2) = nCandi;
+						tmp.at<uchar>(row, nCol - 1) = nCandi;
+						tmp.at<uchar>(row, nCol)	 = nCandi;
+						tmp.at<uchar>(row, nCol + 1) = nCandi;
+						tmp.at<uchar>(row, nCol + 2) = nCandi;
+
+						tmpLine.at<uchar>(row, nCol - 2) = 255;
+						tmpLine.at<uchar>(row, nCol - 1) = 255;
+						tmpLine.at<uchar>(row, nCol)	 = 255;
+						tmpLine.at<uchar>(row, nCol + 1) = 255;
+						tmpLine.at<uchar>(row, nCol + 2) = 255;						
+					}
+				}
+			}
+		}
+
+		//tmp = tmp * 255;
+		//normalize(tmp, ColTable, 0, 255, CV_MINMAX, CV_8UC1);
+		ColTable = tmpLine.clone();
+	}
+
+	// 对行格线采用直线拟合的方式进行断裂修补
+	void repairTableRowLine(Mat &RowTable, int nTop, int nBottom, int nLeft, int nRight)
+	{
+		Mat tmp = RowTable.clone();
+		Mat tmpLine = Mat::zeros(tmp.rows, tmp.cols, CV_8UC1);
+
+		int nCandi = 1;
+		int nRadius = 7;
+
+		//vector<float> vRefK;
+		//vector<float> vRefB;
+
+		for (int i = nTop; i < nBottom; i++)
+		{
+			//for (int j = nLeft; j < nRight; j++)
+			for (int j = nRight - 1; j >= nLeft; j--)
+			{
+				if (tmp.at<uchar>(i,j) == 255)
+				{
+					vector<int> vecLineX;
+					vector<int> vecLineY;
+
+					int nColTmp = j;
+					int nPreRow = i;
+					int nSum = 0;
+					int nCnt = 0;
+
+					while (nColTmp >= nLeft)
+					{
+						nSum = 0;
+						nCnt = 0;
+						if (tmp.at<uchar>(nPreRow, nColTmp) == 255)
+						{
+							vecLineX.push_back(nPreRow);
+							vecLineY.push_back(nColTmp);
+							tmp.at<uchar>(nPreRow, nColTmp) = nCandi;
+							nSum += nPreRow;
+							nCnt++;
+						}
+
+						for (int k = 1; k < nRadius; k++)
+						{
+							if (nPreRow - k >= 0 && tmp.at<uchar>(nPreRow - k, nColTmp) == 255)
+							{
+								vecLineX.push_back(nPreRow - k);
+								vecLineY.push_back(nColTmp);
+								tmp.at<uchar>(nPreRow - k, nColTmp) = nCandi;
+								nSum += nPreRow - k;
+								nCnt++;
+							}
+
+							if (nPreRow + k < tmp.rows && tmp.at<uchar>(nPreRow + k, nColTmp) == 255)
+							{
+								vecLineX.push_back(nPreRow + k);
+								vecLineY.push_back(nColTmp);
+								tmp.at<uchar>(nPreRow + k, nColTmp) = nCandi;
+								nSum += nPreRow + k;
+								nCnt++;
+							}
+						}
+
+						if (nCnt != 0)
+						{
+							nPreRow = nSum * 1.0 / nCnt + 0.5;
+						}
+
+						nColTmp--;
+					}
+
+					nColTmp = j;
+					nPreRow = i;
+
+					while (nColTmp < nRight)
+					{
+						nSum = 0;
+						nCnt = 0;
+						if (tmp.at<uchar>(nPreRow, nColTmp) == 255)
+						{
+							vecLineX.push_back(nPreRow);
+							vecLineY.push_back(nColTmp);
+							tmp.at<uchar>(nPreRow, nColTmp) = nCandi;
+							nSum += nPreRow;
+							nCnt++;						
+						}
+
+						for (int k = 1; k < nRadius; k++)
+						{
+							if (nPreRow - k >= 0 && tmp.at<uchar>(nPreRow - k, nColTmp) == 255)
+							{
+								vecLineX.push_back(nPreRow - k);
+								vecLineY.push_back(nColTmp);
+								tmp.at<uchar>(nPreRow - k, nColTmp) = nCandi;
+								nSum += nPreRow - k;
+								nCnt++;
+							}
+
+							if (nPreRow + k < tmp.rows && tmp.at<uchar>(nPreRow + k, nColTmp) == 255)
+							{
+								vecLineX.push_back(nPreRow + k);
+								vecLineY.push_back(nColTmp);
+								tmp.at<uchar>(nPreRow + k, nColTmp) = nCandi;
+								nSum += nPreRow + k;
+								nCnt++;
+							}
+						}
+
+						if (nCnt)
+						{
+							nPreRow = nSum * 1.0 / nCnt + 0.5;
+						}
+
+						nColTmp++;
+					}
+
+					sort(vecLineY.begin(), vecLineY.end());
+					if (abs(vecLineY[0] - vecLineY[vecLineY.size() - 1]) < (nRight - nLeft) * 0.4)
+					//if (vecLineX.size() < (nRight - nLeft) * 0.6)
+					{
+						for (int k = 0; k < vecLineX.size(); k++)
+						{
+							tmp.at<uchar>(vecLineX[k], vecLineY[k]) = 0;
+						}
+						continue;
+					}
+
+					Mat srcX = Mat::zeros(vecLineX.size(), 1, CV_32FC1);
+					Mat srcY = Mat::zeros(vecLineY.size(), 1, CV_32FC1);
+					Mat dst;
+
+					for (int k = 0; k < vecLineX.size(); k++)
+					{
+						srcX.at<float>(k,0) = vecLineX[k];
+						srcY.at<float>(k,0) = vecLineY[k];
+					}
+
+					mypolyfit(srcY, srcX, dst, 1);
+					float k = dst.at<float>(1,0);
+					float b = dst.at<float>(0,0);
+					
+					//vRefK.push_back(k);
+					//vRefB.push_back(b);
+
+					for (int nCol = nLeft; nCol < nRight; nCol++)
+					{
+						int nRow = k * nCol + b;
+						if (nRow < max(0, nTop - 20) || nRow > min(nBottom + 20, tmp.rows - 1))	/// 允许你存在一定的偏差 20170427
+						{
+							continue;
+						}
+
+						tmp.at<uchar>(nRow + 2, nCol) = nCandi;
+						tmp.at<uchar>(nRow - 1, nCol) = nCandi;
+						tmp.at<uchar>(nRow + 0, nCol) = nCandi;
+						tmp.at<uchar>(nRow + 1, nCol) = nCandi;
+						tmp.at<uchar>(nRow + 2, nCol) = nCandi;
+
+						tmpLine.at<uchar>(nRow + 2, nCol) = 255;
+						tmpLine.at<uchar>(nRow - 1, nCol) = 255;
+						tmpLine.at<uchar>(nRow + 0, nCol) = 255;
+						tmpLine.at<uchar>(nRow + 1, nCol) = 255;
+						tmpLine.at<uchar>(nRow + 2, nCol) = 255;
+					}
+				}
+			}
+		}
+
+		/// 仅提取绘制的框线
+		//tmp = tmp * 255;
+		//normalize(tmp, RowTable,0, 255, CV_MINMAX, CV_8UC1);
+		RowTable = tmpLine.clone();
+	}
+	
+	// 根据行线表进行切片高度的统计
+	int getTableHeight(Mat &RowGray, Rect rectRoi)
+	{
+		if (RowGray.empty()) {
+			return 0;
+		}
+
+		int nSum = 0;
+		int nMin = 0x7FFFFFFF;
+		int nCnt = 0;
+		int nMedianCol = (rectRoi.x + rectRoi.br().x) >> 1;
+
+		bool bFalg = false;
+		int nPreRow = 0;
+
+		for (int i = 1; i < RowGray.rows - 1; i++)
+		{
+			if (RowGray.at<uchar>(i - 1, nMedianCol) == 255 && RowGray.at<uchar>(i, nMedianCol) == 0)
+			{
+				bFalg = true;
+				nPreRow = i;
+			}
+
+			if (bFalg && RowGray.at<uchar>(i - 1, nMedianCol) == 0 && RowGray.at<uchar>(i, nMedianCol) == 255)
+			{
+				bFalg = false;
+				nSum += i - nPreRow;
+				nMin = min(nMin, i - nPreRow);
+				nCnt++;
+			}
+		}
+
+		if (nMin < 20)
+		{
+			if (nCnt)
+			{
+				return nSum * 1.0 / nCnt + 0.5;
+			}
+			else
+			{
+				return 16;
+			}
+		}
+		else{
+			return nMin;
+		}		
+	}
+
+	// 根据行线表进行切片宽度统计
+	int getTableWidth(Mat &ColGray, Rect rectRoi)
+	{
+		if (ColGray.empty())
+		{
+			return 0;
+		}
+
+		int nSum = 0;
+		int nCnt = 0;
+		int nMedianRow = (rectRoi.y + rectRoi.br().y) >> 1;
+
+		bool bFalg = false;
+		int nPreRow = 0;
+
+		for (int i = 1; i < ColGray.cols - 1; i++)
+		{
+			if (ColGray.at<uchar>(nMedianRow, i - 1) && ColGray.at<uchar>(nMedianRow, i) == 0)
+			{
+				bFalg = true;
+				nPreRow = i;
+			}
+
+			if (bFalg && ColGray.at<uchar>(nMedianRow, i - 1) == 0 && ColGray.at<uchar>(nMedianRow, i))
+			{
+				bFalg = false;
+				nSum += (i - nPreRow);
+				nCnt++;
+			}
+		}
+
+		if (nCnt)
+		{
+			return nSum * 1.0 / nCnt + 0.5;
+		}
+		else
+		{
+			return 0;
+		}
+	}
+
+	/// 文字字段划分，更多针对table形式
+	void splitRectRefDis(Mat src, vector<Rect>& vRect)
+	{
+		if (src.empty())
+		{
+			return;
+		}
+
+		vRect.clear();
+
+		/// 两种二值化方法组合
+		Mat bw1, bw2, sBw, nBw;
+		threshold(src, bw1, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+		adaptiveThreshold(src, bw2, 255, ADAPTIVE_THRESH_GAUSSIAN_C, CV_THRESH_BINARY_INV, 7, 20);
+		bw1 = bw1 & bw2;
+		dilate(bw1, bw2, Mat::ones(bw1.rows * 2, 1, CV_8UC1));
+
+		/// 字符列方向划分
+		vector<int> colHist;
+		vector<Rect> vCharRect;
+		vector<SegPart> vSegPart;
+		calcColHist(bw2, colHist);
+		segHist(colHist, 0.5, vSegPart);
+
+		for (int i = 0; i < vSegPart.size(); i++)
+		{
+			Mat localImg = bw1.colRange(vSegPart[i].nStart, vSegPart[i].nEnd).clone();
+
+			int nTop = -1, nBot = -1;
+
+			getTopAndBot(localImg, nTop, nBot);
+
+			if (nTop == -1 || nBot == -1 || nBot < nTop)
+			{
+				nTop = 0;
+				nBot = localImg.rows - 1;
+			}
+
+			vCharRect.push_back(Rect(vSegPart[i].nStart, nTop, vSegPart[i].nEnd - vSegPart[i].nStart + 1, nBot - nTop + 1));
+		}
+
+		/// 计算字符参考高度
+		vector<int> vRefHeight;
+		for (int i = 0; i < vCharRect.size(); i++)
+		{
+			vRefHeight.push_back(vCharRect[i].height);
+		}
+
+		int nRefHeiThresh = getMedian(vRefHeight);	
+		int nStart = 0, nEnd;
+		vector<int> vIntGap;
+		vIntGap.resize(vCharRect.size());
+		vIntGap[0] = -1;
+
+		bool bSlant = false;	/// 判断该域是否为斜体
+
+		for (int i = 1; i < vCharRect.size(); i++)
+		{
+			if ((vCharRect[i].y + vCharRect[i].height / 2) > (src.rows/2) && vCharRect[i].height < nRefHeiThresh * 0.6)
+			{
+				vIntGap[i] = -1;
+			}
+			else
+			{
+				vIntGap[i] = vCharRect[i].x - vCharRect[nStart].br().x;
+				nStart = i;
+			}
+
+			if (vCharRect[i].width >= nRefHeiThresh * 1.5)
+			{
+				bSlant = true;
+				break;
+			}
+		}
+
+		if (bSlant || vIntGap.size() < 3)
+		{
+			vRect.push_back(Rect(0,0,src.cols, src.rows));
+			return;
+		}
+
+		/// 根据字符间距阈值判断是否在该处进行划分,这里的划分阈值如何才能做到自适应呢？？？？
+		vector<int> vSplitIdx;
+		for (int i = 1; i < vIntGap.size() - 1; i++)
+		{
+			if (vIntGap[i] >= nRefHeiThresh * 0.5 && vIntGap[i - 1] >= 0)
+			{
+				vSplitIdx.push_back(i);
+			}
+		}
+
+		if (vSplitIdx.size() == 0)
+		{
+			vRect.push_back(Rect(0,0,src.cols, src.rows));
+			return;
+		}
+
+		nStart = 0;
+		nEnd = (vCharRect[vSplitIdx[0]].x + vCharRect[vSplitIdx[0] - 1].br().x) / 2;
+		vRect.push_back(Rect(nStart, 0, nEnd - nStart, src.rows));
+		for (int i = 1; i < vSplitIdx.size(); i++)
+		{	
+			nStart = nEnd;
+			nEnd = (vCharRect[vSplitIdx[i]].x + vCharRect[vSplitIdx[i] - 1].br().x) / 2;
+			vRect.push_back(Rect(nStart, 0, nEnd - nStart, src.rows));
+		}
+
+		nStart = nEnd;
+		nEnd = src.cols;
+		vRect.push_back(Rect(nStart, 0, nEnd - nStart, src.rows));
+
+	}
+	
+	/// 无框线文字定位
+	void locTableText(Mat& src, vector<Rect>& vCellRect){
+		if (src.empty())
+		{
+			LOG(ERROR) << "Image must not be empty!";
+			return;
+		}
+
+		Mat bw;
+		vCellRect.clear();
+
+		/// 预处理，确定表格是否90度旋转,后续尝试添加倾斜矫正算法(minAreaRect)
+		{
+			//__TIC__;
+			threshold(src, bw, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+			//adaptiveThreshold(src, bw, 255, ADAPTIVE_THRESH_GAUSSIAN_C, CV_THRESH_BINARY_INV, 7, 20);
+			medianBlur(bw, bw, 3);
+			dilate(bw, bw, Mat::ones(3,3,CV_8UC1));
+
+			Mat rowGray, colGray;
+			morphologyEx(bw, rowGray, MORPH_CLOSE, Mat::ones(7, bw.cols/20, CV_8UC1));
+			morphologyEx(bw, colGray, MORPH_CLOSE, Mat::ones(bw.rows/20, 7, CV_8UC1));
+
+			float fRowStd = getRectStd(rowGray, false);
+			float fColStd = getRectStd(colGray, true);
+
+
+			if ((fColStd < fRowStd && fColStd > 0) || (fRowStd == 0))
+			{
+				//LOG(INFO) << "Image need to trans.";
+				src = src.t();	
+				flip(src, src, 1);
+
+				bw = bw.t();	
+				flip(bw, bw, 1);
+			}
+			//__TOC__;
+		}
+
+		/// 形态学算法进行文字域定位
+		{
+			//__TIC__;
+			Mat ref1, ref2;					
+			vector<vector<Point>> contours, contours2;
+			bool bFlag = false;
+			float dbRefThresh = 255;
+
+			/// 1、对二值图像进行连通域分析，判断表格图像是否存在阴影，如果存在阴影需要对阴影部分重新进行二值化处理。
+			Two_Pass(bw, contours);
+
+			for (int i = 0; i < contours.size(); i++)
+			{
+				Rect rc = boundingRect(contours[i]);				
+				if (rc.width > bw.cols / 10)
+				{					
+					float dbThresh = iThresh::getOtsuThresh(src, contours[i]);					
+					bFlag = true;
+					dbRefThresh = IVMIN(dbThresh, dbRefThresh);
+					bw(rc) = 0;	
+				}				
+			}
+
+			/// 阴影部分需要进行特殊处理，进一步降低阴影对二值化的干扰
+			if (bFlag)
+			{	
+				LOG(INFO) << "Has Gray Region, and Ref Otsu Thresh is " << dbRefThresh;				
+				Mat tBw;
+				threshold(src, tBw, dbRefThresh, 255, CV_THRESH_BINARY_INV);
+				bw = bw | tBw;
+				medianBlur(bw, bw, 3);
+			}
+
+			/// 2、对二值图像进行膨胀+连通域操作，定位相关域信息。
+			/// 膨胀目的是将同一个域内的信息合并
+			/// 域间距离过小容易导致两个域合并.
+			dilate(bw, ref1, Mat::ones(5, 50, CV_8UC1));
+			Two_Pass(ref1, contours);		
+
+			/// 分析各个域的参考高度
+			vector<int> vIntHeight;
+			for (int i = 0; i < contours.size(); i++)
+			{
+				vIntHeight.push_back(boundingRect(contours[i]).height);				
+			}
+
+			/// 字符域参考高度信息
+			int nRefHeight = getMedian(vIntHeight);
+
+			for (int i = 0; i < contours.size(); i++)
+			{
+				Rect rc = boundingRect(contours[i]);
+
+				if (rc.height < nRefHeight * 0.6)
+				{
+					continue;
+				}
+				vCellRect.push_back(rc);
+			}
+
+			/// 字符划分		
+			vector<Rect> tmpRect, totalRect;
+			for (int i = 0; i < vCellRect.size(); i++)
+			{
+				splitRectRefDis(src(vCellRect[i]), tmpRect);
+				for (int j = 0; j < tmpRect.size(); j++)
+				{
+					totalRect.push_back(Rect(vCellRect[i].x + tmpRect[j].x, vCellRect[i].y, tmpRect[j].width, vCellRect[i].height));
+				}	
+			}
+
+			vCellRect = totalRect;		
+
+			//__TOC__;
+		}
+
+		sort(vCellRect.begin(), vCellRect.end(), sortRectTopLeft);
+
+	}
+
+	/// 标准表格线定位
+	void locStandardFormText(Mat src, vector<Rect>& vCellRect){
+		Mat bwImg;
+		double dThres = threshold(src, bwImg, 220, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+		threshold(src, bwImg, dThres - 30, 255, CV_THRESH_BINARY_INV);
+		fillEdge(bwImg);
+		vector<vector<Point>> outLabel;
+		//Two_Pass(bwImg, outLabel);
+		findContours(bwImg.clone(), outLabel, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+		Mat resultTable = Mat::zeros(bwImg.rows, bwImg.cols, CV_8UC1);
+		int nRefBlockHeight = 0;
+		for (int i = 0; i < outLabel.size(); i++)
+		{
+			Rect rc = boundingRect(outLabel[i]);
+			if (rc.width < bwImg.cols / 4 || rc.height < 80)
+			{
+				continue;
+			}
+
+			Mat tmpG = bwImg(Range(rc.y, rc.y + rc.height), Range(rc.x, rc.x + rc.width)).clone();
+			copyMakeBorder(tmpG, tmpG, rc.y, src.rows - rc.y - rc.height, rc.x, src.cols - rc.x - rc.width,BORDER_CONSTANT, Scalar(0,0,0,0));
+						
+			/// 干掉文字，只保留格线，20170121
+			{
+				vector<vector<Point>> tmpContour;
+				findContours(tmpG.clone(), tmpContour, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+				//Two_Pass(tmpG, tmpContour);
+				for (int t = 0; t < tmpContour.size(); t++)
+				{
+					Rect roi = boundingRect(tmpContour[t]);
+					if (roi.height < rc.height * 0.2 && roi.width < rc.width * 0.1)
+					{
+						for (int j = 0; j < tmpContour[t].size(); j++)
+						{
+							tmpG.at<uchar>(tmpContour[t][j]) = 0;
+						}
+					}
+				}
+			}
+
+			// /***************************************************************************************************************************/
+			// 图像表格线定位
+			// 提取格线所采用的形态学直径
+			int radius = 51;
+
+			Mat rowGray, colGray;
+			//  表格列格线提取与断裂修补
+			Mat element = getStructuringElement(MORPH_RECT, Size(1, radius));
+			morphologyEx(tmpG, colGray, MORPH_OPEN, element);
+
+			// 表格行格线提取与断裂修补
+			element = getStructuringElement(MORPH_RECT, Size(radius, 1));
+			morphologyEx(tmpG, rowGray, MORPH_OPEN, element);
+
+			repairTableColLine(colGray, rc.y, rc.y + rc.height, rc.x, rc.x + rc.width);
+			repairTableRowLine(rowGray, rc.y, rc.y + rc.height, rc.x, rc.x + rc.width);
+
+			// 行格线宽改为自适应方式，根据行高来进行处理。
+			int height = getTableHeight(rowGray, rc);	nRefBlockHeight = std::max(nRefBlockHeight, height);
+			int width = getTableWidth(colGray, rc);
+
+			// 格线进行处理
+			element = getStructuringElement(MORPH_RECT, Size(5,1));
+			dilate(colGray.clone(), colGray, element);
+
+			element = getStructuringElement(MORPH_RECT, Size(1,5));						// 用于代发工资单，
+			dilate(rowGray.clone(), rowGray, element);
+
+			// 得到最终的格线
+			tmpG = colGray | rowGray;
+			resultTable = resultTable | tmpG;
+		}
+
+		if (nRefBlockHeight == 0)
+		{
+			return;
+		}
+
+		/// 连通域查找
+		outLabel.clear();
+		findContours(resultTable.clone(), outLabel, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+		for (int i = 0; i < outLabel.size(); i++)
+		{
+			Rect rc = boundingRect(outLabel[i]);
+			if (rc.height < 16 || rc.width < 16 || rc.height > nRefBlockHeight * 2)
+			{
+				continue;
+			}
+			vCellRect.push_back(rc);
+		}
+
+		sort(vCellRect.begin(), vCellRect.end(), sortRectTopLeft);
+	}
+	
+	struct rects_points
+	{
+		Rect rect;
+		vector<Point> points_vec;
+	};
+	
+	void find_table_ROI(Mat &tBw, vector<rects_points> &rects_points_vec)
+	{
+		rects_points tmp;
+		vector<Vec4i> hierarchy;
+		Mat neighbor_bw = Mat(tBw.size(), CV_32SC1, Scalar(-1, -1, -1, -1));
+		Mat neighbor_used = Mat(tBw.size(), CV_8UC1, Scalar(0,0,0,0));
+
+		int watershed_index = -1;
+		vector<int> watershed_index_cnt, assigned_index;
+		map<int, int> large_index2inner_index, inner_index2large_index;
+		const int min_num = 1000;
+		Point pt;
+		vector<Point> neightbor;
+		vector<Point> neightbor_vec;
+		neightbor_vec.push_back(Point(-1, -1));		neightbor_vec.push_back(Point(-1, -0));		neightbor_vec.push_back(Point(-1, 1));
+		neightbor_vec.push_back(Point(0, -1));		 											neightbor_vec.push_back(Point(0, 1));
+		neightbor_vec.push_back(Point(1, -1));		neightbor_vec.push_back(Point(1, -0));		neightbor_vec.push_back(Point(1, 1));
+
+		for (int i = 0; i < tBw.rows; ++i)
+		{
+			for (int j = 0; j < tBw.cols; ++j)
+			{
+				if (neighbor_bw.at<int>(i, j) == -1 && tBw.at<uchar>(i, j) == 255)
+				{
+					neightbor.clear();
+					neightbor.push_back(Point(j, i));
+					++watershed_index;
+					while (neightbor.size() != 0)
+					{
+						if(neighbor_bw.at<int>(*neightbor.begin()) != -1)
+						{
+							neightbor.erase(neightbor.begin());
+							continue;
+						}
+						neighbor_bw.at<int>(*neightbor.begin()) = watershed_index;
+
+						for (unsigned int k = 0; k < neightbor_vec.size(); ++k)
+						{
+							pt.x = min(tBw.cols - 1, max(0, neightbor.begin()->x + neightbor_vec[k].x));
+							pt.y = max(0, min(tBw.rows - 1, neightbor.begin()->y + neightbor_vec[k].y));
+
+							if (tBw.at<uchar>(pt) == 255 &&
+								neighbor_used.at<uchar>(pt) == 0)
+							{
+								neightbor.push_back(pt);
+								neighbor_used.at<uchar>(pt) = 1;
+							}
+						}
+						neightbor.erase(neightbor.begin());
+					}
+				}
+			}
+		}
+
+		watershed_index_cnt.resize(watershed_index + 1);
+		for (int i = 0; i < neighbor_bw.rows; ++i)
+		{
+			for (int j = 0; j < neighbor_bw.cols; ++j)
+			{
+				if (neighbor_bw.at<int>(i, j) != -1)
+				{
+					++watershed_index_cnt[neighbor_bw.at<int>(i, j)];
+				}
+			}
+		}
+
+		int inner_index = 0;
+		for (unsigned int i = 0; i < watershed_index_cnt.size(); ++i)
+		{
+			//大于阈值的点集
+			if (watershed_index_cnt[i] > min_num)
+			{
+				inner_index2large_index[inner_index] = i;
+				large_index2inner_index[i] = inner_index++;
+			}
+		}
+		if(large_index2inner_index.size() <= 0)	return;
+
+		rects_points_vec.resize(large_index2inner_index.size());
+		assigned_index.resize(large_index2inner_index.size());
+
+		for (unsigned int inner_index = 0; inner_index < rects_points_vec.size(); ++inner_index)
+		{
+			rects_points_vec[inner_index].points_vec.resize(watershed_index_cnt[inner_index2large_index[inner_index]]);
+		}
+
+		for (unsigned int i = 0; i < neighbor_bw.rows; ++i)
+		{
+			for (unsigned int j = 0; j < neighbor_bw.cols; ++j)
+			{
+				if (large_index2inner_index.find(neighbor_bw.at<int>(i, j)) != large_index2inner_index.end())
+				{
+					inner_index = large_index2inner_index[neighbor_bw.at<int>(i, j)];
+					rects_points_vec[inner_index].points_vec[assigned_index[inner_index]].x = j;
+					rects_points_vec[inner_index].points_vec[assigned_index[inner_index]].y = i;
+					++assigned_index[inner_index];
+				}
+			}
+		}
+
+		for (int i = 0; i < rects_points_vec.size(); ++i)
+		{
+			rects_points_vec[i].rect = boundingRect(rects_points_vec[i].points_vec);
+		}
+
+		//double toc = getTickCount();
+		//cout<<"耗时::"<<(toc-tic)/getTickFrequency()<<endl;
+		return;
+	}
+	
+	bool remove_neg_1_contianed_rects_points_vec(rects_points r)
+	{
+		return r.rect.x == -1;
+	}
+	
+	bool sort_by_rects_points_area_decrease(const rects_points r1,const rects_points r2)
+	{
+		return r1.rect.area() > r2.rect.area();
+	}
+	
+	void erase_ROI_rects(vector<rects_points> &ROI_rects_points)
+	{
+		sort(ROI_rects_points.begin(), ROI_rects_points.end(), sort_by_rects_points_area_decrease);
+
+		if (ROI_rects_points.begin()->rect.width < 100)
+		{
+			ROI_rects_points.clear();
+		}
+
+		for (int i = 0; i < ROI_rects_points.size(); ++i)
+		{
+			if ((ROI_rects_points[i].rect.x < 5 || ROI_rects_points[i].rect.y < 5))
+			{
+				ROI_rects_points[i].rect.x = -1;
+				continue;
+			}
+
+			for (int j =  0; j < ROI_rects_points.size(); ++j)
+			{
+				if (i == j || ROI_rects_points[j].rect.x == -1)
+				{
+					continue;
+				}
+
+				if ((ROI_rects_points[j].rect.width < ROI_rects_points[i].rect.width * 0.6 &&
+					ROI_rects_points[j].rect.height < ROI_rects_points[i].rect.height * 0.6)
+					|| (ROI_rects_points[j].rect.width < ROI_rects_points[i].rect.width * 0.1)
+					|| (ROI_rects_points[j].rect.height < ROI_rects_points[i].rect.height * 0.1)
+					|| (ROI_rects_points[j].points_vec.size() < ROI_rects_points[i].points_vec.size() * 0.2))
+				{
+					ROI_rects_points[j].rect.x = -1;
+				}
+			}
+		}
+
+		ROI_rects_points.erase(remove_if(ROI_rects_points.begin(), ROI_rects_points.end(), remove_neg_1_contianed_rects_points_vec), 
+			ROI_rects_points.end());
+	}
+	
+	/// 消除无意义轮廓
+	void erase_contours(vector<vector<Point> > &contours, vector<vector<Rect> > &vecRectArray)
+	{
+		vector<Rect> vecRects, vecTmpRects;
+		vecRectArray.clear();
+
+		// area sort and get rects.
+		if (!contours.empty())
+		{
+			sort(contours.begin(), contours.end(), sort_contours_area);
+			contours.erase(contours.begin());//王博添加删除最大面积轮廓20171122（针对全文识别修改）
+		}
+		
+		for (int i = 0; i < contours.size(); i++)
+		{
+			Rect rc = boundingRect(contours[i]);
+			if (/*rc.height > 200 ||*/ rc.height < 10 || rc.width < 15)				// 这里的参数需要自适应，后面考虑下如何处理。（20171122王博注释掉第一个大于200条件，针对全文识别修改）
+			{
+				continue;
+			}
+			vecRects.push_back(rc);
+		}
+
+		// row sort
+		sort(vecRects.begin(), vecRects.end(), sort_rect_by_y_center);
+
+		// select for every row.
+		for (int i = 0; i < vecRects.size(); )
+		{
+			vecTmpRects.clear();
+
+			vecTmpRects.push_back(vecRects[i]);
+
+			int j = i + 1;
+			while (j < vecRects.size())
+			{
+				//if (abs(vecRects[j - 1].y + vecRects[j - 1].height -  vecRects[j].y - vecRects[j].height) < vecRects[j - 1].height * 0.4)
+				if (CheckIfSameRow(vecTmpRects, vecRects[j]))
+				{
+					vecTmpRects.push_back(vecRects[j]);
+					j++;
+				}
+				else
+				{
+					i = j;
+					break;
+				}
+			}
+
+			if (j == vecRects.size())
+			{
+				i = j;
+			}
+
+			sort(vecTmpRects.begin(), vecTmpRects.end(), sort_rect_by_x_center);
+
+			vecRectArray.push_back(vecTmpRects);
+		}
+	}
+
+	/// 与财报中算法完全一致
+	void locFormText(Mat& src, Mat& bwImg, vector<Rect>& vCellRect){
+		if (src.empty()) {
+			vCellRect.clear();
+			return;
+		}
+
+		int nHeight = src.rows;
+		int nWidth  = src.cols;
+		
+		if (bwImg.empty()) {
+			double dThres = threshold(src, bwImg, 220, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+			threshold(src, bwImg, std::max(60.0, dThres - 30), 255, CV_THRESH_BINARY_INV);
+		}
+		
+		//morphologyEx(bwImg, bwImg, MORPH_CLOSE, Mat::ones(1, 3, CV_8UC1));
+		//morphologyEx(bwImg, bwImg, MORPH_CLOSE, Mat::ones(3, 1, CV_8UC1));
+
+		vector<rects_points> rects_points_vec;
+		find_table_ROI(bwImg, rects_points_vec);		// 对二值图像进行连通域标记，选择连通域个数大于1000作为候选区域。
+
+		if (rects_points_vec.size() == 0) {
+			return ;
+		}		
+
+		erase_ROI_rects(rects_points_vec);
+
+		vector<Rect> vRect;
+		{	/// 二次倾斜矫正
+			Mat tmpSrc = Mat::ones(nHeight, nWidth, CV_8UC1) * 255;	
+			Mat tmpBwI = Mat::zeros(nHeight, nWidth, CV_8UC1);
+			for (int i = 0; i < rects_points_vec.size(); i++) {
+				Rect rectROI = boundingRect(rects_points_vec[i].points_vec);
+
+				/// 边界异常判断
+				int edge = 5;
+				if (rectROI.x < edge || rectROI.y < edge || rectROI.br().x > nWidth - edge || rectROI.br().y > nHeight - edge) {
+					continue;
+				}
+
+				if (rectROI.height<0.33*nHeight&&rectROI.width<0.33*nWidth)
+				{
+					continue;
+				}
+				Mat tmpB = bwImg(Range(rectROI.y, rectROI.y + rectROI.height), Range(rectROI.x, rectROI.x + rectROI.width)).clone();
+				Mat tmpS = src(Range(rectROI.y, rectROI.y + rectROI.height), Range(rectROI.x, rectROI.x + rectROI.width)).clone();
+				copyMakeBorder(tmpB, tmpB, rectROI.y, nHeight - rectROI.y - rectROI.height, rectROI.x, nWidth - rectROI.x - rectROI.width,BORDER_CONSTANT, Scalar(0,0,0,0));
+				copyMakeBorder(tmpS, tmpS, rectROI.y, nHeight - rectROI.y - rectROI.height, rectROI.x, nWidth - rectROI.x - rectROI.width,BORDER_CONSTANT, Scalar(255,255,255,255));
+
+				Mat tranMat = iSkew::SkewAdjust(tmpB, tmpB, rectROI);
+				if (!tranMat.empty()) {
+					warpPerspective(tmpS, tmpS, tranMat, Size(tmpS.cols, tmpS.rows));
+				}
+				tmpS(rectROI).copyTo(tmpSrc(rectROI));
+				tmpB(rectROI).copyTo(tmpBwI(rectROI));
+				vRect.push_back(rectROI);
+			}
+
+			src.release();	bwImg.release();
+			src = tmpSrc;			
+			threshold(src, bwImg, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+			adaptiveThreshold(src, bwImg, 255, CV_ADAPTIVE_THRESH_GAUSSIAN_C,CV_THRESH_BINARY_INV, 11, 10);;
+			bwImg = bwImg | tmpBwI;
+		}
+
+		bool bRotated = false;
+		int nRefBlockHeight = 0;
+		Mat resultTable = Mat::zeros(nHeight, nWidth, CV_8UC1);
+
+		for (int i = 0; i < vRect.size(); i++) {
+			Rect rectROI = vRect[i];
+			int stdRuler=max(rectROI.width,rectROI.height);
+			/// 边界异常判断
+			int edge = 5; 
+			if (rectROI.x < edge || rectROI.y < edge || rectROI.br().x > nWidth - edge || rectROI.br().y > nHeight - edge) {
+				continue;
+			}
+
+			Mat locBwI = bwImg(Range(rectROI.y, rectROI.y + rectROI.height), Range(rectROI.x, rectROI.x + rectROI.width)).clone();
+			copyMakeBorder(locBwI, locBwI, rectROI.y, nHeight - rectROI.y - rectROI.height, rectROI.x, nWidth - rectROI.x - rectROI.width, BORDER_CONSTANT, Scalar(0,0,0,0));
+
+			/// 干掉文字，只保留格线，20170121
+			{
+				vector<vector<Point>> tmpContour;
+				findContours(locBwI.clone(), tmpContour, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+				for (int t = 0; t < tmpContour.size(); t++) {
+					Rect rc = boundingRect(tmpContour[t]);
+					if (rc.height < stdRuler*0.03 && rc.width <stdRuler  * 0.03)//王博修改字符剔除条件20170925，原为rc.height < rectROI.height * 0.2 && rc.width < rectROI.width * 0.1
+					{
+						locBwI(rc) = 0;
+					}
+				}
+			}
+
+			// /***************************************************************************************************************************/
+			// 图像表格线定位
+			// 提取格线所采用的形态学直径
+			int radius = 51;
+
+			Mat colGray, rowGray;
+
+			//  表格列格线提取与断裂修补
+			Mat element = getStructuringElement(MORPH_RECT, Size(1, radius));
+			//Mat dst,colsImg,rowsImg;
+			//vector<Rect> colLineRegions,rowLineRegions;
+			//iLineExtract::edlHoughLines(locBwI,dst);
+			//
+			//imwrite("edlines检测结果.bmp",dst);
+			//colLinesExtract(dst,rectROI,colsImg,colLineRegions);
+			//imwrite("列线段提取.bmp",colsImg);
+			//rowLinesExtract(dst,rectROI,rowsImg,rowLineRegions);
+			//imwrite("行线段提取.bmp",rowsImg);
+			//Mat lineExtractImg=colsImg|rowsImg;
+			//imwrite("线段提取合并.bmp",lineExtractImg);
+			////imshow("格线修复",dst);
+			////waitKey(0);
+			morphologyEx(locBwI, colGray, MORPH_OPEN, element);
+
+			// 表格行格线提取与断裂修补
+			element = getStructuringElement(MORPH_RECT, Size(radius, 1));
+			morphologyEx(locBwI, rowGray, MORPH_OPEN, element);
+			/*存在一些样本的文字剔除不干净，导致行、列格线形态学提取后出现比较短的干扰线，拟合后出现干扰线，在拟合前添加一个干扰线去除步骤20180417王博*/
+			removeMorphErrColLine(colGray,vRect[i]);
+			removeMorphErrRowLine(rowGray,vRect[i]);
+			repairTableColLine(colGray, rectROI.y, rectROI.y + rectROI.height, rectROI.x, rectROI.x + rectROI.width);
+			repairTableRowLine(rowGray, rectROI.y, rectROI.y + rectROI.height, rectROI.x, rectROI.x + rectROI.width);
+
+			// 行格线宽改为自适应方式，根据行高来进行处理。
+			int height = getTableHeight(rowGray, rectROI);
+			int width = getTableWidth(colGray, rectROI);
+
+			if (height >0.8* width && height && width) //原为height > width && height && width，王博20170925修改
+			{
+				bRotated = true;
+				height = width;			
+			}
+
+			nRefBlockHeight = max(nRefBlockHeight, height);
+
+#define COL_REPAIR
+#ifdef COL_REPAIR
+			// 只对正常放置的图片进行左右边界格线的处理，存在90/270度旋转的不能进行该处理
+			if (!bRotated)
+			{
+				// row left and right
+				vector<vector<Point> > contours;
+				findContours(rowGray.clone(), contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+				vector<int> leftX;
+				vector<int> rightX;
+				vector<int> rowY;
+				for (int i = 0; i < contours.size(); i++)
+				{
+					Rect rc = boundingRect(contours[i]);
+					if (rc.width < rectROI.width / 4)			// 针对某些表中存在横线填充进行优化补偿
+					{
+						continue;
+					}
+
+					leftX.push_back(rc.x);
+					rightX.push_back(rc.br().x);
+					rowY.push_back((rc.y + rc.height) >> 1);
+				}
+				if (contours.empty())//20180203王博加入判断
+				{
+					vCellRect.clear();
+					return;
+				}
+				int nLeftMin = leftX[0];
+				int nLeftMax = leftX[0];
+
+				int nRightMin = rightX[0];
+				int nRightMax = rightX[0];
+
+				for (int i = 1; i < rightX.size(); i++)
+				{
+					nLeftMax = max(nLeftMax, leftX[i]);
+					nLeftMin = min(nLeftMin, leftX[i]);
+
+					nRightMax = max(nRightMax, rightX[i]);
+					nRightMin = min(nRightMin, rightX[i]);
+				}
+
+				if (nLeftMax - nLeftMin > 50)
+				{
+					nLeftMax = nLeftMin + 10;
+				}
+
+				if (nRightMax - nRightMin > 50)
+				{
+					nRightMin =  nRightMax - 10;
+				}
+
+				//cout<< "<" << nLeftMin << ", " << nLeftMax << ">, <" << nRightMin << ", " << nRightMax << ">" <<endl;
+
+				// col left and right
+				contours.clear();
+				findContours(colGray.clone(), contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+				int nLeft = rowGray.cols - 1;
+				int nRight = 0;
+				if (contours.empty())//20180203王博加入判断
+				{
+					vCellRect.clear();
+					return;
+				}
+				for (int i = 0; i < contours.size(); i++)
+				{
+					Rect rc = boundingRect(contours[i]);
+					nLeft = min(nLeft, rc.x);
+					nRight = max(nRight, rc.br().x);
+				}
+
+				//cout<< nLeft << ", " << nRight <<endl;
+
+				// 填充最左边列
+				if (nLeft > nLeftMax + 10)
+				{
+					Mat srcX = Mat::zeros(rowY.size(), 1, CV_32FC1);
+					Mat srcY = Mat::zeros(leftX.size(), 1, CV_32FC1);
+					Mat dst;
+
+					for (int k = 0; k < leftX.size(); k++)
+					{
+						srcX.at<float>(k,0) = rowY[k];
+						srcY.at<float>(k,0) = leftX[k];
+					}
+
+					medianBlur(srcY, srcY, 3);
+
+					mypolyfit(srcX, srcY, dst, 1);
+					float k = dst.at<float>(1,0);
+					float b = dst.at<float>(0,0);
+
+					for (int row = rectROI.y; row < rectROI.y + rectROI.height; row++)
+					{
+						int nCol = k * row + b + 0.5;
+						if (nCol < rectROI.x - 30 || nCol > rectROI.x + rectROI.width + 30)		// 左右格线可能是斜线，故这里需要给出一定冗余误差
+						{
+							continue;
+						}
+
+						colGray.at<uchar>(row, nCol - 1) = 255;
+						colGray.at<uchar>(row, nCol)	 = 255;
+						colGray.at<uchar>(row, nCol + 1) = 255;
+					}
+				}
+
+				// 填充最右边列
+				if (nRight < nRightMin - 10)
+				{
+					Mat srcX = Mat::zeros(rowY.size(), 1, CV_32FC1);
+					Mat srcY = Mat::zeros(rightX.size(), 1, CV_32FC1);
+					Mat dst;
+
+					for (int k = 0; k < rightX.size(); k++)
+					{
+						srcX.at<float>(k,0) = rowY[k];
+						srcY.at<float>(k,0) = rightX[k];
+					}
+
+					medianBlur(srcY, srcY, 3);
+					mypolyfit(srcX, srcY, dst, 1);
+					float k = dst.at<float>(1,0);
+					float b = dst.at<float>(0,0);
+
+					for (int row = rectROI.y; row < rectROI.y + rectROI.height; row++)
+					{
+						int nCol = k * row + b + 0.5;
+						if (nCol < rectROI.x - 30 || nCol > rectROI.x + rectROI.width + 30)
+						{
+							continue;
+						}
+
+						colGray.at<uchar>(row, nCol - 1) = 255;
+						colGray.at<uchar>(row, nCol)	 = 255;
+						colGray.at<uchar>(row, nCol + 1) = 255;
+					}
+				}
+			}
+#endif
+			// 格线进行拓宽处理
+			element = getStructuringElement(MORPH_RECT, Size(5,1));
+			dilate(colGray.clone(), colGray, element);
+
+			element = getStructuringElement(MORPH_RECT, Size(1,5));						// 用于代发工资单，
+
+			// 得到最终的格线
+			//locBwI = colGray | rowGray;
+			resultTable = resultTable | colGray | rowGray;
+		}
+
+		// 得到最终的表格
+		bwImg.release();
+		bwImg = resultTable.clone();
+		resultTable.release();
+
+		// ******************************判断图像是否存在90度旋转**************************************//
+		if (bRotated) {
+			std::swap(nHeight, nWidth);
+			
+			Mat tmpG = Mat::zeros(nHeight, nWidth, bwImg.type());
+			Mat tmpS = Mat::zeros(nHeight, nWidth, src.type());
+
+			for (int i = 0; i < nHeight; i++)
+			{
+				for (int j = 0; j < nWidth; j++)
+				{
+					tmpG.at<uchar>(i,nWidth-j-1) = bwImg.at<uchar>(j,i);
+					tmpS.at<uchar>(i,nWidth-j-1) = src.at<uchar>(j,i);
+				}
+			}
+
+			bwImg.release();	bwImg = tmpG;
+			src.release();		src = tmpS;
+		}
+				
+		vector<vector<Point>> outLabel;
+		findContours(bwImg.clone(), outLabel, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+#define ORIG
+#ifdef ORIG
+		vector<vector<Rect>> vecRectArray;
+		//erase_contours(outLabel, vecRectArray);
+		//sort(outLabel,sort_contours_area);
+
+		erase_contours(outLabel, vecRectArray);
+		for (int i = 0; i < vecRectArray.size(); i++)
+		{
+			vCellRect.insert(vCellRect.begin(), vecRectArray[i].begin(), vecRectArray[i].end());
+		}
+#else
+		for (int i = 0; i < outLabel.size(); i++) {
+			Rect rc = boundingRect(outLabel[i]);
+			if (rc.height < 16 || rc.width < 16 || rc.height > 300 || rc.height < nRefBlockHeight * 0.7) {
+				continue;
+			}
+			vCellRect.push_back(rc);
+		}
+#endif
+		sort(vCellRect.begin(), vCellRect.end(), sortRectTopLeft);
+
+		/// fine tuning
+		{
+			Mat tmpBwI = (255 - bwImg) / 255;
+			Mat tmpSrc = Mat::zeros(nHeight, nWidth, src.type());
+			for (int i = 0; i < vCellRect.size(); i++)
+			{
+				Rect rc = vCellRect[i];
+				Mat tmp = src(rc).clone();
+				tmp = tmp.mul(tmpBwI(rc));
+				tmp.copyTo(tmpSrc(rc));			
+			}
+			src.release(); src = tmpSrc;
+		}
+	}
+
+	/// 可变形表格线定位
+	void locVariFormText(Mat src, vector<Rect>& vCellRect){
+
+		Mat bw1, bw2, bw3, bw;
+		bw1 = Mat::zeros(src.rows, src.cols, CV_8UC1);
+		bw2 = Mat::zeros(src.rows, src.cols, CV_8UC1);
+		threshold(src, bw1, 0, 255, CV_THRESH_OTSU | CV_THRESH_BINARY_INV);
+		adaptiveThreshold(src, bw2, 255, ADAPTIVE_THRESH_GAUSSIAN_C, CV_THRESH_BINARY_INV, 9, 10);
+
+		/// <对局部二值结果进行降噪>
+		//{
+		//	vector<vector<Point>> outLabel;
+		//	findContours(bw2.clone(), outLabel, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+		//	for (int i = 0; i < outLabel.size(); i++)
+		//	{
+		//		Rect rc = boundingRect(outLabel[i]);
+		//		if (rc.height <= 2 && rc.width <= 2)
+		//		{
+		//			bw2(rc) = 0;
+		//		}
+		//	}
+		//}
+
+		bw = bw1 | bw2;
+		fillEdge(bw);
+
+		morphologyEx(bw, bw3, MORPH_GRADIENT, Mat::ones(3,3,CV_8UC1));
+		dilate(bw, bw, Mat::ones(3,3,CV_8UC1));
+		bw |= bw3;
+		bw = bw3.clone();
+
+		morphologyEx(bw, bw1, MORPH_CLOSE, Mat::ones(3,1,CV_8UC1));	
+		morphologyEx(bw, bw2, MORPH_CLOSE, Mat::ones(1,3,CV_8UC1));	
+		bw = bw1 | bw2;
+
+		/// 剔除疑似文字区域
+#define USE_DEL_CHAR
+#ifdef USE_DEL_CHAR
+		{
+			vector<vector<Point>> outLabel;
+			findContours(bw.clone(), outLabel, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+			for (int i = 0; i < outLabel.size(); i++)
+			{
+				Rect rc = boundingRect(outLabel[i]);
+				if (/*rc.height > 16 && */rc.height < 60)	
+				{
+					Mat tmp = bw(rc) ;
+					if (sum(tmp).val[0] / 255.0 / tmp.total() > 0.3)
+					{
+						bw(rc) = 0;
+					}			
+				}
+			}
+		}
+#endif
+
+		/// 连通域
+		vector<vector<Point>> outLabel;
+		Two_Pass(bw, outLabel);
+
+		{
+			Mat	resultLine = Mat::zeros(bw.rows, bw.cols, CV_8UC1);
+
+			vector<int>  vRefInt;
+			for (int i = 0; i < outLabel.size(); i++)
+			{
+				Rect rc = boundingRect(outLabel[i]);
+				if (rc.height < 60 || rc.width < bw.cols/3)	continue;
+
+				vRefInt.push_back(i);
+			}
+
+			if (vRefInt.size() == 0){
+				LOG(ERROR) << "This is a form.";
+				return;
+			}else{
+				LOG(INFO) << "This is a table.";
+			}
+
+			vector<vector<Rect>> arrRect;
+						
+			for (int i = 0; i < vRefInt.size(); i++)
+			{
+				Mat refBwImg = Mat::zeros(bw.rows, bw.cols, CV_8UC1);			
+
+				Rect rc = boundingRect(outLabel[vRefInt[i]]);
+#ifdef USE_DEL_CHAR				
+				bw(rc).copyTo(refBwImg(rc));
+#else 
+				for (int j = 0; j < outLabel[vRefInt[i]].size(); j++)
+				{
+					refBwImg.at<uchar>(outLabel[vRefInt[i]][j]) = 255;				
+				}
+#endif
+				/// 水平投影进行断裂县的修补
+				vector<int> rowHist, colHist;
+				calcColHist(refBwImg, colHist);
+				calcRowHist(refBwImg, rowHist);
+
+				vector<SegPart> vColSeg, vRowSeg;
+				segHist(rowHist, 0.4, vRowSeg);
+				segHist(colHist, 0.3, vColSeg);
+
+				for (int j = 0; j < vRowSeg.size();  j++)
+				{		
+					if (vRowSeg[j].nEnd - vRowSeg[j].nStart > 10)
+					{
+						continue;
+					}
+					refBwImg(Range(vRowSeg[j].nStart, vRowSeg[j].nEnd), Range(vColSeg[0].nStart, vColSeg[vColSeg.size() - 1].nEnd)) = 255;
+				}
+
+				//refBwImg(Range(vRowSeg[0].nStart, vRowSeg[vRowSeg.size() - 1].nEnd), Range(vColSeg[0].nStart, vColSeg[0].nEnd)) = 255;
+				//refBwImg(Range(vRowSeg[0].nStart, vRowSeg[vRowSeg.size() - 1].nEnd), Range(vColSeg[vColSeg.size() - 1].nStart, vColSeg[vColSeg.size() - 1].nEnd)) = 255;
+
+				/// 进一步进行表格线的提取与增强
+				Mat rowGray = refBwImg.clone(), colGray = refBwImg.clone(), localLine = refBwImg.clone();
+				morphologyEx(colGray, colGray, MORPH_OPEN, Mat::ones(11, 1, CV_8UC1));
+				morphologyEx(colGray, colGray, MORPH_CLOSE, Mat::ones(11, 1, CV_8UC1));
+				morphologyEx(colGray, colGray, MORPH_OPEN, Mat::ones(51, 1, CV_8UC1));					
+				dilate(colGray, colGray, Mat::ones(11,1,CV_8UC1));
+
+				morphologyEx(rowGray, rowGray, MORPH_OPEN, Mat::ones(1, localLine.cols/20, CV_8UC1));		
+				dilate(rowGray, rowGray, Mat::ones(1,5,CV_8UC1));
+
+				/// fine tuning
+				{
+					/// row
+					vector<vector<Point>> rowLabel, colLabel;
+					findContours(rowGray.clone(), rowLabel, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+					for (int iIdxLabel = 0; iIdxLabel < rowLabel.size(); iIdxLabel++)
+					{
+						Rect roi = boundingRect(rowLabel[iIdxLabel]);
+						if (roi.width < rc.width * 0.75)
+						{
+							rowGray(roi) = 0;
+						}
+					}
+
+					findContours(colGray.clone(), colLabel, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+					for (int iIdxLabel = 0; iIdxLabel < colLabel.size(); iIdxLabel++)
+					{
+						Rect roi = boundingRect(colLabel[iIdxLabel]);
+						colGray(Range(rc.y, rc.br().y), Range(roi.x, roi.br().x)) = 255;
+					}
+
+					colGray &= refBwImg;
+					morphologyEx(colGray, colGray, MORPH_CLOSE, Mat::ones(21, 1, CV_8UC1));
+
+				}
+
+
+				localLine = colGray | rowGray;
+
+				/// 定位后表格中Rect提取
+				vector<vector<Point>> contours;
+				findContours(localLine.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+
+				vector<Rect> vRefRect;
+				for (int i = 0; i < contours.size(); i++)
+				{
+					Rect rc = boundingRect(contours[i]);
+					if (rc.height < 12 || rc.width < 12)
+					{
+						continue;
+					}
+					vRefRect.push_back(rc);
+				}
+
+				/// 未定位有文字域
+				if (vRefRect.size() < 1)
+				{
+					continue;
+				}
+
+				sort(vRefRect.begin(), vRefRect.end(), sortRectDscendArea);
+
+				vRefRect.erase(vRefRect.begin());
+				sort(vRefRect.begin(), vRefRect.end(), sortRectTopLeft);
+
+				if (vRefRect.size())
+				{
+					arrRect.push_back(vRefRect);
+				}
+
+				resultLine |= localLine;			
+			}
+
+			/// change arrRect to vRect
+			{
+				sort(arrRect.begin(), arrRect.end(), sortVRectLeftTop);
+				for (int i = 0; i < arrRect.size(); i++)
+				{
+					vCellRect.insert(vCellRect.end(), arrRect[i].begin(), arrRect[i].end());
+				}
+			}
+		}
+	}
+	
+	/// 自动判断输入表格的类型
+	iTableFormType judgeTableFormType(Mat src){
+		Mat bw1, bw2, bw3, bw;
+		bw1 = Mat::zeros(src.rows, src.cols, CV_8UC1);
+		bw2 = Mat::zeros(src.rows, src.cols, CV_8UC1);
+		threshold(src, bw1, 0, 255, CV_THRESH_OTSU | CV_THRESH_BINARY_INV);
+		adaptiveThreshold(src, bw2, 255, ADAPTIVE_THRESH_GAUSSIAN_C, CV_THRESH_BINARY_INV, 11, 10);
+
+		/// <对局部二值结果进行降噪>
+		{
+			vector<vector<Point>> outLabel;
+			findContours(bw2.clone(), outLabel, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+			for (int i = 0; i < outLabel.size(); i++)
+			{
+				Rect rc = boundingRect(outLabel[i]);
+				if (rc.height <= 2 && rc.width <= 2)
+				{
+					bw2(rc) = 0;
+				}
+			}
+		}
+
+		bw = bw1 | bw2;
+		fillEdge(bw);
+
+		morphologyEx(bw, bw3, MORPH_GRADIENT, Mat::ones(3,3,CV_8UC1));
+		dilate(bw, bw, Mat::ones(3,3,CV_8UC1));
+		bw |= bw3;
+
+		morphologyEx(bw, bw1, MORPH_CLOSE, Mat::ones(3,1,CV_8UC1));	
+		morphologyEx(bw, bw2, MORPH_CLOSE, Mat::ones(1,3,CV_8UC1));	
+		bw = bw1 | bw2;
+
+		/// 剔除疑似文字区域
+#define USE_DEL_CHAR
+#ifdef USE_DEL_CHAR
+		{
+			vector<vector<Point>> outLabel;
+			findContours(bw.clone(), outLabel, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+			for (int i = 0; i < outLabel.size(); i++)
+			{
+				Rect rc = boundingRect(outLabel[i]);
+				if (rc.height > 16 && rc.height < 60)	
+				{
+					Mat tmp = bw(rc) ;
+					if (sum(tmp).val[0] / 255.0 / tmp.total() > 0.3)
+					{
+						bw(rc) = 0;
+					}			
+				}
+			}
+		}
+#endif
+
+		/// 连通域
+		vector<vector<Point>> outLabel;
+		Two_Pass(bw, outLabel);
+				
+		vector<int>  vRefInt;
+		for (int i = 0; i < outLabel.size(); i++)
+		{
+			Rect rc = boundingRect(outLabel[i]);
+			if (rc.height < 300 || rc.width < bw.cols/4)	/// 这里需要自适应判断
+				continue;
+
+			vRefInt.push_back(i);
+		}
+
+		if (vRefInt.size() == 0){
+			return TABLE;
+		}
+		else{
+			return FORM_NORM;
+		}		
+	}
+	///非标准的带有合并单元格情况的表格定位（20171129王博，全文识别的需求）
+	void locValidForm(/*Mat& color, */Mat& gray, Mat&bwImg, vector<Rect>& vCellRect){		
+		//if (color.empty()/* || gray.empty()*/) {			
+		//	return;
+		//}
+
+		//if (gray.empty()) {
+		//	cvtColor(color, gray, COLOR_BGR2GRAY);
+		//}
+
+		int nHeight = gray.rows;
+		int nWidth  = gray.cols;
+
+		if (bwImg.empty()) {
+			double dThres = threshold(gray, bwImg, 220, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+			threshold(gray, bwImg, std::max(60.0, dThres - 30), 255, CV_THRESH_BINARY_INV);
+		}
+
+		vector<rects_points> rects_points_vec;
+		find_table_ROI(bwImg, rects_points_vec);		// 对二值图像进行连通域标记，选择连通域个数大于1000作为候选区域。
+
+		if (rects_points_vec.size() == 0) {
+			return ;
+		}		
+
+		erase_ROI_rects(rects_points_vec);
+
+		/// 有效区域定位
+		Rect validROI;
+		{
+			vector<Rect> vRect;
+			for (int i = 0; i < rects_points_vec.size(); i++) {
+				Rect locROI = boundingRect(rects_points_vec[i].points_vec);
+
+				/// 边界异常判断
+				if (locROI.x < 20 || locROI.y < 20 || locROI.br().x > nWidth - 20 || locROI.br().y > nHeight - 20) {
+					continue;
+				}
+				vRect.push_back(locROI);
+			}
+			int nLef = bwImg.cols;
+			int nRig = 0;
+			int nTop = bwImg.rows;
+			int nBot = 0;
+
+			for (int i = 0; i < vRect.size(); i++)
+			{
+				nLef = min(nLef, vRect[i].x);
+				nRig = max(nRig, vRect[i].br().x);
+				nTop = min(nTop, vRect[i].y);
+				nBot = max(nBot, vRect[i].br().y);
+			}
+
+			validROI = Rect(nLef, nTop, nRig - nLef, nBot - nTop);
+		}
+
+		{	/// 二次倾斜矫正
+			Mat tmpSrc = Mat::ones(nHeight, nWidth, CV_8UC1) * 255;	
+			Mat tmpBwI = Mat::zeros(nHeight, nWidth, CV_8UC1);
+
+
+			Mat tmpB = bwImg(Range(validROI.y, validROI.y + validROI.height), Range(validROI.x, validROI.x + validROI.width)).clone();
+			Mat tmpS = gray(Range(validROI.y, validROI.y + validROI.height), Range(validROI.x, validROI.x + validROI.width)).clone();
+			copyMakeBorder(tmpB, tmpB, validROI.y, nHeight - validROI.y - validROI.height, validROI.x, nWidth - validROI.x - validROI.width,BORDER_CONSTANT, Scalar(0,0,0,0));
+			copyMakeBorder(tmpS, tmpS, validROI.y, nHeight - validROI.y - validROI.height, validROI.x, nWidth - validROI.x - validROI.width,BORDER_CONSTANT, Scalar(255,255,255,255));
+
+			Mat tranMat = iSkew::SkewAdjust(tmpB, tmpB, validROI);
+			if (!tranMat.empty()) {
+				warpPerspective(tmpS, tmpS, tranMat, Size(tmpS.cols, tmpS.rows),1,0,Scalar(255,255,255));
+				//warpPerspective(color, color, tranMat, Size(color.cols, color.rows),1,0,Scalar(255,255,255));
+			}
+			tmpS(validROI).copyTo(tmpSrc(validROI));
+			tmpB(validROI).copyTo(tmpBwI(validROI));
+
+
+			gray.release();	bwImg.release();
+			gray = tmpSrc;			
+			threshold(gray, bwImg, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+			bwImg |= tmpBwI;
+
+			int radius = 51;
+
+			//  表格列格线提取与断裂修补
+			Mat element = getStructuringElement(MORPH_RECT, Size(1, radius)), colGray, rowGray;
+			morphologyEx(bwImg, colGray, MORPH_OPEN, element);
+
+			// 表格行格线提取与断裂修补
+			element = getStructuringElement(MORPH_RECT, Size(radius, 1));
+			morphologyEx(bwImg, rowGray, MORPH_OPEN, element);
+
+			bwImg = colGray | rowGray;
+
+			///三次倾斜校正，以表格框线二值图为对象计算旋转纠偏矩阵，同时旋转彩色与灰度图
+			Mat  tranMat2=iSkew::SkewAdjust(bwImg,bwImg,Rect(0,0,0,0));
+			if (!tranMat2.empty()) {
+				warpPerspective(gray, gray, tranMat2, Size(gray.cols, gray.rows),1,0,Scalar(255,255,255));
+				//warpPerspective(color, color, tranMat2, Size(color.cols, color.rows),1,0,Scalar(255,255,255));
+			}
+			dilate(bwImg, bwImg, Mat::ones(3,3,CV_8UC1));
+
+			//提取单元格
+			vector<vector<Point>> contours;
+			findContours(bwImg.clone(), contours, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+#define ORIG
+#ifdef ORIG
+			vector<vector<Rect>> vecRectArray;
+			//erase_contours(outLabel, vecRectArray);
+			//sort(outLabel,sort_contours_area);
+
+			erase_contours(contours, vecRectArray);
+			for (int i = 0; i < vecRectArray.size(); i++)
+			{
+				vCellRect.insert(vCellRect.begin(), vecRectArray[i].begin(), vecRectArray[i].end());
+			}
+#else
+			for (int i = 0; i < outLabel.size(); i++) {
+				Rect rc = boundingRect(outLabel[i]);
+				if (rc.height < 16 || rc.width < 16 || rc.height > 300 || rc.height < nRefBlockHeight * 0.7) {
+					continue;
+				}
+				vCellRect.push_back(rc);
+			}
+#endif
+			sort(vCellRect.begin(), vCellRect.end(), sortRectTopLeft);
+
+			/// fine tuning
+			{
+				Mat tmpBwI = (255 - bwImg) / 255;
+				Mat tmpSrc = Mat::zeros(nHeight, nWidth, gray.type());
+				for (int i = 0; i < vCellRect.size(); i++)
+				{
+					Rect rc = vCellRect[i];
+					Mat tmp = gray(rc).clone();
+					tmp = tmp.mul(tmpBwI(rc));
+					tmp.copyTo(tmpSrc(rc));			
+				}
+				gray.release(); gray = tmpSrc;
+			}
+		}
+	}
+	
+	/// 文字定位通用接口，根据配置参数的不同调用不同的接口
+	void locTextRect(Mat& gray, Mat& bwImg, vector<Rect>& vCellRect, iTableFormType iType){
+
+		/// 判断表单类型,如果表单类型未知则尝试进行表单类型判断，输出为FORM_ANY / TABLE.
+		if (iType != FORM_ANY && iType != FORM_NORM && iType != TABLE){
+			iType = judgeTableFormType(gray);                                       //王博为全文识别注释掉20171123，使得算法进入default以定位合并单元格类型表格
+		}
+
+		switch (iType) {		
+		case FORM_NORM:	locFormText(gray, bwImg, vCellRect);	break;
+		//case FORM_ANY:	locVariFormText(gray, vCellRect);		break;
+		case FORM_ANY:	locFormText(gray, bwImg, vCellRect);	break;
+		case TABLE:		locTableText(gray, vCellRect);			break;
+		default:		locValidForm(gray,bwImg,vCellRect);		break;			//王博20171129替换，原为locVari()
+		}
+	}
+
+	void sortRectAsArray(vector<Rect> vecRects, vector<vector<Rect> > &vecRectArray)
+	{
+		// row sort
+		sort(vecRects.begin(), vecRects.end(), sortRectAscendY);
+
+		vector<Rect> vecTmpRects;
+		// select for every row.
+		for (int i = 0; i < vecRects.size(); )
+		{
+			vecTmpRects.clear();
+
+			vecTmpRects.push_back(vecRects[i]);
+
+			int j = i + 1;
+			while (j < vecRects.size())
+			{			
+				if (CheckIfSameRow(vecTmpRects, vecRects[j]))
+				{
+					vecTmpRects.push_back(vecRects[j]);
+					j++;
+				}
+				else
+				{
+					i = j;
+					break;
+				}
+			}
+
+			if (j == vecRects.size())
+			{
+				i = j;
+			}
+
+			sort(vecTmpRects.begin(), vecTmpRects.end(), sortRectAscendX);
+
+			vecRectArray.push_back(vecTmpRects);
+		}
+	}
+}
+

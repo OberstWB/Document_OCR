@@ -1,0 +1,467 @@
+#include "stdafx.h"
+#include "icvAutoClassifyBasedKeywords.h"
+#include "icvCalcKeywordFtr.h"
+
+
+long icvAutoClassifyKeyword_init(string modelpath) {
+	return icvInitOcrHandle(modelpath);
+}
+
+void icvAutoClassifyKeyword_uninit(long& handle) {
+	icvUnInitOcrHandle(handle);
+}
+
+/// 将string字符串转换为由单个str组成的vector字符串
+void icvStr2VecStr(string str, vector<string>& vecStr) {
+	vecStr.clear();
+	for (int i = 0; i < str.size(); i++) {
+		string tmp = "";
+		if ((str[i] & 0x80) >> 7) {
+			tmp = str.substr(i, 2);
+			i++;
+		} else {
+			tmp = str[i];
+		}
+		vecStr.push_back(tmp);
+	}
+}
+
+/// 关键字字符串匹配
+float stringMatch(vector<string> libKeywords, vector<string> keywords, int dis,vector<int>& Matchwordidx) {
+	if (0 == libKeywords.size()) {
+		return 0;
+	}
+
+	if (dis <= 0)
+		dis = 50;
+
+	int libNum = libKeywords.size(), num = keywords.size() / 3;
+	int score = 0;
+	int k = 0;
+	vector<int> index;
+	for (int i = 0; i < libNum; i++) {
+		for (int j = k; j < keywords.size(); j = j + 3) {
+			if (libKeywords[i] == keywords[j] || libKeywords[i] == keywords[j + 1] || libKeywords[i] == keywords[j + 2]) {
+				Matchwordidx.push_back(j / 3);
+				score = score + 1;
+				k = j + 3;
+				index.push_back(j);
+				break;
+			}
+		}
+	}
+
+	int detectNum = index.size();	
+	if (abs(num - libNum) < dis * libNum) {
+		if (detectNum > 1) {
+			int diff = 0;
+			for (int l = 1; l < detectNum; l++) {
+				diff = diff + (index[l] - index[l - 1]) / 3;
+			}
+			if (0 == diff) {
+				diff = 1;
+			}
+
+			float weight = (float)(detectNum - 1) / (float)diff;
+			if (weight > 0.7) weight = 1;
+
+			return weight * (float)score * 100.0F / (float)libNum;
+		} else {
+			return (float)score * 100.0F / (float)libNum;
+		}
+	} else {
+		return 0;
+	}
+}
+
+/// <判断字符视为为数字>
+bool isNum(vector<string> vecStr) {
+	bool bRet = false;
+	for (int i = 0; i < vecStr.size(); i++) {
+		if (vecStr[i].empty()) {
+			continue;
+		}
+		if (vecStr[i][0] >= '0' && vecStr[i][0] <= '9') {
+			bRet = true;
+			break;
+		}
+	}
+	return bRet;
+}
+
+/// <判断字符是否为英文>
+bool isEng(vector<string> vecStr) {
+	bool bRet = false;
+	for (int i = 0; i < vecStr.size(); i++) {
+		if (vecStr[i].empty()) {
+			continue;
+		}
+		if (vecStr[i][0] >= 'a' && vecStr[i][0] <= 'z' || vecStr[i][0] >= 'A' && vecStr[i][0] <= 'Z') {
+			bRet = true;
+			break;
+		}
+	}
+	return bRet;
+}
+
+/// <将英文字符中的大小字符转为小写字符，方便英文字符的匹配>
+void cvtUp2Lower(vector<vector<string>>& arrStr) {
+	for (int ia = 0; ia < arrStr.size(); ia++) {
+		for (int ib = 0; ib < arrStr[ia].size(); ib++) {
+			if (arrStr[ia][ib].empty()) {
+				continue;
+			}
+			if (arrStr[ia][ib][0] >= 'A' && arrStr[ia][ib][0] <= 'Z') {
+				arrStr[ia][ib][0] += 32;
+			}
+		}
+	}
+}
+
+void cvtNum2Eng(vector<vector<string>>& arrStr) {
+	for (int ia = 0; ia < arrStr.size(); ia++) {
+		for (int ib = 0; ib < arrStr[ia].size(); ib++) {
+			if (arrStr[ia][ib].empty()) {
+				continue;
+			}
+			if (arrStr[ia][ib][0] == '0') {
+				arrStr[ia][ib][0] = 'o';
+			} else if (arrStr[ia][ib][0] == '1') {
+				arrStr[ia][ib][0] = 'l';
+			}
+		}
+	}
+}
+
+
+float icvRecAndMatchRoiMat(long ocrHandle, vector<string> libStr, bool bEng, Mat outRoi, int refHeight, bool bOri = true) {
+	/// <重切片中提取关键字>
+	vector<vector<string>> arrStr;
+	if (bEng) {
+		icvGetRoiImageStrEng(ocrHandle, ~outRoi, arrStr);		
+	} else {
+		icvGetRoiImageStr(ocrHandle, outRoi, refHeight, arrStr, bOri);
+	}
+
+	/// <英文关键字的特殊处理>
+	if (bEng) {
+		cvtUp2Lower(arrStr);
+		cvtNum2Eng(arrStr);
+	}
+
+	/// <字符串匹配>
+	float fMaxScore = 0;
+	for (int m = 0; m < arrStr.size(); m++) {
+		vector<int> MatchIdx;
+		float fscore = stringMatch(libStr, arrStr[m], 30, MatchIdx);
+		fMaxScore = max(fMaxScore, fscore);
+		if (fscore >= 80) {			
+			break;
+		}
+	}
+	return fMaxScore;
+}
+
+bool icvGetCurTemplateRoiMat(Mat inMat, ImageTemplate itInfo, int nKeyIdx, ReferPtInfo imgRefPt, int nCoarse, Mat& outRoi, bool scale) {
+	int wsfx, wsfy, wsfw, wsfh;
+	Point refPt = itInfo.ReferPoint;
+	Point formRefPt = imgRefPt.formPt;
+	float wratio = 1.0f, hratio = 1.0f;
+
+	if (imgRefPt.isForm && itInfo.tForms.size()) {
+		float formHeight = (itInfo.tForms[0].FormPoints[2].y - itInfo.tForms[0].FormPoints[0].y);
+		float formWidth  = (itInfo.tForms[0].FormPoints[1].x - itInfo.tForms[0].FormPoints[0].x);
+
+		hratio *= imgRefPt.formHeight / formHeight;
+		wratio *= imgRefPt.formWidth / formWidth;
+	}
+
+	/// <当前图像无外边框，且存在参考点，这里主要是针对带LOGO的模板进行参考点的比对>
+	/// <无外边框且有LOGO，需要跟模板的LOGO进行参考点的比对>
+	{
+		int logoIdx = -1;	
+
+		if (imgRefPt.isForm == false && formRefPt.x && formRefPt.y) {
+			if (itInfo.tLogos.size()) {
+				bool bLogoNotMatch = true;
+				for (logoIdx = 0; logoIdx < itInfo.tLogos.size(); logoIdx++) {
+					if (string(itInfo.tLogos[logoIdx].WordsResult) == "证件图标"
+						|| string(itInfo.tLogos[logoIdx].WordsResult) == "证件图标2") {
+							refPt.x = itInfo.tLogos[logoIdx].AccField.x + itInfo.tLogos[logoIdx].AccField.width / 2;
+							refPt.y = itInfo.tLogos[logoIdx].AccField.y + itInfo.tLogos[logoIdx].AccField.height / 2;
+							if (abs(refPt.x - formRefPt.x) > 280 || abs(refPt.y - formRefPt.y) > 220) {
+								bLogoNotMatch = 0;
+								continue;
+							}
+							bLogoNotMatch = true;
+							break;
+					}
+				}
+
+				/// <LOGO坐标与图像参考点差异过大则不进行识别>
+				if (bLogoNotMatch) {
+					return true;
+				}
+			} else {
+				return false;
+			}
+		}
+
+		/// <如果没有LOGO或LOGO非定位用，则将参考点合并>
+		if (logoIdx == -1 || logoIdx == itInfo.tLogos.size()) {
+			refPt = itInfo.ReferPoint;
+		}
+	}
+
+	/// <确认最终的参考点>
+	if (formRefPt.x == 0 || formRefPt.y == 0) {
+		formRefPt = refPt;
+	}
+
+	/// <关键字的搜索范围>
+	if (nCoarse) {
+		wsfx = itInfo.tCoarKeyWords[nKeyIdx].AccField.x;
+		wsfy = itInfo.tCoarKeyWords[nKeyIdx].AccField.y;
+		wsfw = itInfo.tCoarKeyWords[nKeyIdx].AccField.width;
+		wsfh = itInfo.tCoarKeyWords[nKeyIdx].AccField.height;
+	} else {
+		wsfx = itInfo.tFineKeyWords[nKeyIdx].AccField.x;
+		wsfy = itInfo.tFineKeyWords[nKeyIdx].AccField.y;
+		wsfw = itInfo.tFineKeyWords[nKeyIdx].AccField.width;
+		wsfh = itInfo.tFineKeyWords[nKeyIdx].AccField.height;
+	}
+
+	/// <实际相对于参考点的搜索范围>
+	int refx = (wsfx - refPt.x) * wratio;	/// <考虑缩放>
+	int refy = (wsfy - refPt.y) * hratio;	/// <考虑缩放>
+
+	int nMinX = max(formRefPt.x + refx, 0);
+	int nMaxX = min(nMinX + wsfw, inMat.cols - 1);
+	int nMinY = max(formRefPt.y + refy, 0);
+	int nMaxY = min(nMinY + wsfh, inMat.rows - 1);
+
+	/// <二次尺度>
+	if (scale)
+	{
+		nMinX = max(nMinX - wsfw/* / 2*/, 0);
+		nMaxX = min(nMaxX + wsfw/* / 2*/, inMat.cols - 1);
+		nMinY = max(nMinY - wsfh / 2, 0);
+		nMaxY = min(nMaxY + wsfh / 2, inMat.rows - 1);
+	}
+
+	if (nMinX >= nMaxX || nMinY >= nMaxY) {
+		return false;
+	}
+
+	outRoi = inMat(Rect(nMinX, nMinY, nMaxX - nMinX + 1, nMaxY - nMinY + 1)).clone();
+
+	return true;
+}
+
+/// <关键字匹配，根据bScale参数的不同选择不同的尺度进行匹配>
+void icvAutoClassifyBasedKeywordScaleMatch(long ocrHandle, Mat binImg, vector<ImageTemplate> vecIT, ReferPtInfo refPtInfo, vector<int>& vecIndex, icvKeyType keyType, bool bScale = false) {
+	if (ocrHandle <= 0 || binImg.empty()) {
+		return;
+	}
+
+	for (int i = 0; i < vecIndex.size(); i++) {
+		if (vecIndex[i] == -1) {
+			continue;
+		}
+		bool bMatch = false;
+		vector<FieldKeyWords> curFieldKey;
+		if (keyType == ICV_KEY_COARSE) {
+			curFieldKey = vecIT[vecIndex[i]].tCoarKeyWords;
+		} else if (keyType == ICV_KEY_FINE){
+			curFieldKey = vecIT[vecIndex[i]].tFineKeyWords;
+		} else {
+			LOG(ERROR) << "Not support";
+			return;
+		}
+
+		for (int j = 0; j < curFieldKey.size(); j++){			
+			Mat outRoi;	
+			bool bRet = icvGetCurTemplateRoiMat(binImg, vecIT[vecIndex[i]], j, refPtInfo, keyType, outRoi, bScale);
+			if (!bRet || outRoi.empty()) {
+				continue;
+			}
+
+			/// <模板文件中保存的关键字提取>
+			vector<string> libStr;
+			icvStr2VecStr(curFieldKey[j].WordsResult, libStr);
+
+			bool bEng = isEng(libStr);
+
+			/// <老版本的切分识别>
+			float fMaxScore = icvRecAndMatchRoiMat(ocrHandle, libStr, bEng, outRoi, curFieldKey[j].AccField.height, true);
+			if (fMaxScore >= 80) {
+				bMatch = true;
+				break;
+			}
+
+			/// <新版本的切分识别 >
+			if (/*fMaxScore > 20*/1){
+				fMaxScore = icvRecAndMatchRoiMat(ocrHandle, libStr, bEng, outRoi, curFieldKey[j].AccField.height, false);
+				if (fMaxScore >= 80) {
+					bMatch = true;
+					break;
+				}
+			}
+		}
+		/// <未匹配则提出>
+		if (!bMatch) {
+			vecIndex[i] = -1;
+		}
+	}
+
+	vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());	
+}
+
+void icvAutoClassifyBasedKeyword(long ocrHandle, Mat binImg, vector<ImageTemplate> vecIT, ReferPtInfo refPtInfo, vector<int>& vecIndex, icvKeyType keyType) {
+	if (ocrHandle <= 0 || binImg.empty()) {
+		return;
+	}
+
+	/// <单尺度匹配>
+	vector<int> tmpVecIndex = vecIndex;
+	icvAutoClassifyBasedKeywordScaleMatch(ocrHandle, binImg, vecIT, refPtInfo, vecIndex, keyType, false);
+	if (vecIndex.size() != 0) {
+		return;
+	}
+
+	/// <放大尺度进行二次匹配>
+	vecIndex = tmpVecIndex;
+	icvAutoClassifyBasedKeywordScaleMatch(ocrHandle, binImg, vecIT, refPtInfo, vecIndex, keyType, true);
+}
+
+bool icvGetTitleRoiMat(Mat inMat, vector<ImageTemplate> vecIT, vector<int>& vecIndex, Mat& outRoi) {
+
+	vector<int> newMatch;
+	for (int i = 0; i < vecIndex.size(); i++) {
+		ImageTemplate curIt = vecIT[vecIndex[i]];
+		if (curIt.ReferPoint.x == 0 && curIt.ReferPoint.y == 0) {
+			int sealFlag = 0;
+			for (int k = 0; k < curIt.tLogos.size(); k++) {
+				string logoName = curIt.tLogos[k].WordsResult;
+				if (logoName.find("印章图标") != string::npos) {
+					sealFlag = 1;
+				}
+			}
+
+			/// <无LOGO，或者LOGO为印章图标>
+			if (curIt.tLogos.empty() || sealFlag) {
+				newMatch.push_back(vecIndex[i]);
+			}
+		}
+	}
+	vecIndex = newMatch;
+	/// 计算所有进行title匹配的模板最小外接矩形
+	float fMinX = 10000, fMaxX = 0;
+	float fMinY = 10000, fMaxY = 0;
+	for (int i = 0; i < newMatch.size(); i++) {
+		ImageTemplate curIT = vecIT[newMatch[i]];
+		if (curIT.tCoarKeyWords.size() == 0) {
+			continue;
+		}
+		fMinX = min(fMinX, curIT.tCoarKeyWords[0].AccField.x);
+		fMaxX = max(fMaxX, curIT.tCoarKeyWords[0].AccField.br().x);
+		fMinY = min(fMinY, curIT.tCoarKeyWords[0].AccField.y);
+		fMaxY = max(fMaxY, curIT.tCoarKeyWords[0].AccField.br().y);
+	}
+
+	if (fMinX >= fMaxX || fMinY >= fMaxY) {
+		return false;
+	}
+
+	Rect roi(0,0,0,0);
+	roi.x      = fMinX;
+	roi.y      = fMinY;
+	roi.width  = (fMaxX < inMat.cols) ? (fMaxX - fMinX + 1) : (inMat.cols - 1 - fMinX);
+	roi.height = (fMaxY < inMat.rows) ? (fMaxY - fMinY + 1) : (inMat.rows - 1- fMinY);
+
+	outRoi = inMat(roi).clone();
+	return true;
+}
+
+
+void icvAutoClassifyTitleMatch(long ocrHandle, Mat binImg, vector<ImageTemplate> vecIT, ReferPtInfo refPtInfo, DocImgInfo imgInfo, int nFormMatch, vector<int>& vecIndex) {
+	if (nFormMatch <= 0 && ((refPtInfo.emblemPt.x == 0) && (refPtInfo.emblemPt.y == 0)) && (imgInfo.fratio > 1.3 && imgInfo.fratio < 1.6)) {		
+		vector<int> vecTempIndex = vecIndex;
+
+		Mat outRoi;
+		icvGetTitleRoiMat(binImg, vecIT, vecIndex, outRoi);
+		
+		vector<vector<string>> arrStr;
+		icvGetRoiImageStr(ocrHandle, outRoi, 80, arrStr);
+		vector<string> vecStr;
+		for (int istr = 0; istr < arrStr.size(); istr++) {
+			vecStr.insert(vecStr.end(), arrStr[istr].begin(), arrStr[istr].end());
+		}
+		
+		for (int idx = 0; idx < vecIndex.size(); idx++) {
+			bool bMatch = false;
+			for (int ikey = 0; ikey < vecIT[vecIndex[idx]].tCoarKeyWords.size(); ikey++) {
+				vector<int> MatchIdx;
+				vector<string> libStr;
+				icvStr2VecStr(vecIT[vecIndex[idx]].tCoarKeyWords[ikey].WordsResult, libStr);
+				float fscore = stringMatch(libStr, vecStr, 30, MatchIdx);
+				if (fscore > 90) {
+					bMatch = true;
+					break;
+				}
+			}
+			if (!bMatch) {
+				vecIndex[idx] = -1;
+			}				
+		}
+		
+		vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());
+
+		/// <关键字细分配>
+		if (vecIndex.size() == 1) {
+			cout<< "Match Over and Return Right Result." <<endl;;
+		}
+
+		/// <关键字细分类>
+		if (vecIndex.size() > 1) {
+			for (int i = 0; i < vecIndex.size(); i++) {
+				bool bMatch = false;
+				for (int j = 0; j < vecIT[vecIndex[i]].tFineKeyWords.size(); j++){
+					Mat outRoi;
+					bool bRet = icvGetCurTemplateRoiMat(binImg, vecIT[vecIndex[i]], j, refPtInfo, 0, outRoi, false);
+					if (!bRet || outRoi.empty()) {
+						continue;
+					}
+					vector<vector<string>> arrStr;
+					icvGetRoiImageStr(ocrHandle, outRoi, vecIT[vecIndex[i]].tFineKeyWords[j].AccField.height, arrStr);
+
+					vector<string> libStr;
+					icvStr2VecStr(vecIT[vecIndex[i]].tFineKeyWords[j].WordsResult, libStr);
+
+					for (int m = 0; m < arrStr.size(); m++) {
+						vector<int> MatchIdx;
+						float fscore = stringMatch(libStr, arrStr[m], 30, MatchIdx);
+						if (fscore > 90) {
+							cout<< "Match" <<endl;;
+							bMatch = true;
+							break;
+						}
+					}
+					if (bMatch) {
+						break;
+					}
+				}
+
+				/// <如果未匹配上则删除>
+				if (!bMatch) {
+					vecIndex[i] = -1;
+				}
+			}
+			vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());			
+		}
+
+		if (vecIndex.size() == 0) {	/// <关键字细分类无法区分则返回原始粗分类结果>
+			vecIndex = vecTempIndex;
+		}
+	}
+}

@@ -1,0 +1,338 @@
+// SegmentAndRecgonition.cpp : 定义 DLL 应用程序的导出函数。
+//
+
+#include "stdafx.h"
+#include "SegmentAndRecgonition.h"
+#include "NormalSegRec.h"
+#include "bwAddrTreeRec.h"
+#include "MixSegMethod.h"
+#include "LineSegRecogonitionNum.h"
+#include "ExcessiveSeg.h"
+
+ #pragma comment (lib,"bwAddrTreeRec.lib")
+ #pragma comment (lib,"MixSegMethod.lib")
+
+namespace SegAndRec_table_ocr
+{
+
+//将关键字“国”“地”调整到前面
+void Exchange_Result(OcrRectResult &temp)
+{
+	OcrRectResult tempp;
+	tempp.dbConfi.push_back(0.0);
+	tempp.imgRect.tTopLeft.x =0;
+	tempp.imgRect.tTopLeft.y =0;
+	tempp.imgRect.tButtomRight.x =0;
+	tempp.imgRect.tButtomRight.y =0;
+	tstring ts =_T("");
+	tempp.strResult =ts;
+	for (int i =0;i<temp.strResult.size();i++)
+	{
+		if (temp.strResult[i] ==_T('国') ||temp.strResult[i] ==_T('地'))
+		{
+			tempp.dbConfi[0] =temp.dbConfi[0];
+			tempp.imgRect =temp.imgRect;
+			tempp.strResult =temp.strResult[0];
+			temp.dbConfi[0] =temp.dbConfi[i];
+			temp.strResult[0] =temp.strResult[i];
+			temp.dbConfi[i] =tempp.dbConfi[0];
+			temp.strResult[i] =tempp.strResult[0];
+
+		}
+	}
+}
+
+//基于联通域分析的单行文字切分与识别方法
+SegAndReg_DLL_API bool SegAndReg(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+{
+	stLineSegmentationParam m_tLineSegmentationParam;
+	stOcrRectList tOcrRectList;
+	initialSegmentationParam(m_tLineSegmentationParam);
+	Mat tImage_copy = tImage.clone();
+	Mat tBwChar_copy = tBwChar.clone();
+	Mat tconnMat;
+	RECTS tRects;
+
+	if(!Process(tImage_copy,tBwChar_copy,tconnMat,tRects))
+		return false;
+
+	SegmentLine(hHandle, iType, p,tImage_copy,tBwChar_copy,tRects,tOcrRectList);
+	
+	if(tOcrRectList.empty())
+		return false;
+	for (int i =0;i<tOcrRectList.size();++i)
+	{
+		OcrRectResult temp;
+		temp.imgRect = tOcrRectList[i].tRect;
+		temp.strResult = tOcrRectList[i].strOcrResult;
+		for (int j = 0; j<10;++j)
+		{
+			if(j<tOcrRectList[i].strOcrResult.size())
+			{
+				double dmin =1-(double)tOcrRectList[i].lDmin[j]/10000;
+				temp.dbConfi.push_back(dmin);
+
+			}
+			else
+				temp.dbConfi.push_back(0.0);			
+		}
+		regResult.vecOcrRectResult.push_back(temp);
+	}
+	
+	return true;
+
+}
+//基于联通域分析的单行文字切分与识别方法
+//SegAndReg_DLL_API bool SegAndReg_ID(long hHandle,int iType/*,MyOcrEngine p*/,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+//{
+//	stLineSegmentationParam m_tLineSegmentationParam;
+//	stOcrRectList tOcrRectList;
+//	initialSegmentationParam(m_tLineSegmentationParam);
+//	Mat tImage_copy = tImage.clone();
+//	Mat tBwChar_copy = tBwChar.clone();
+//	Mat tconnMat;
+//	RECTS tRects;
+//
+//	if(!Process(tImage_copy,tBwChar_copy,tconnMat,tRects))
+//		return false;
+//
+//	SegmentLine_ID(hHandle, iType, /*p,*/tImage_copy,tBwChar_copy,tRects,tOcrRectList);
+//
+//	if(tOcrRectList.empty())
+//		return false;
+//	for (int i =0;i<tOcrRectList.size();++i)
+//	{
+//		OcrRectResult temp;
+//		temp.imgRect = tOcrRectList[i].tRect;
+//		temp.strResult = tOcrRectList[i].strOcrResult;
+//		for (int j = 0; j<10;++j)
+//		{
+//			if(j<tOcrRectList[i].strOcrResult.size())
+//			{
+//				double dmin =1-(double)tOcrRectList[i].lDmin[j]/10000;
+//				temp.dbConfi.push_back(dmin);
+//
+//			}
+//			else
+//				temp.dbConfi.push_back(0.0);			
+//		}
+//		regResult.vecOcrRectResult.push_back(temp);
+//	}
+//
+//	return true;
+//
+//}
+//基于二叉树的单行文字切分识别方法
+SegAndReg_DLL_API bool SegAndReg2(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+{
+	vector<string> regstr;
+	vector<vector<double> > conf;
+	/*wstring limitcharacterset;
+	vector<wstring> similarcharset;
+	vector<wstring> equivalentcharset;*/
+	vector<Rect>imgRect;
+	Mat bw = tBwChar.clone();
+	//imshow("222",bw);
+	//waitKey();
+	//recognizebybinarytree3(hHandle,p,bw,0,imgRect,regstr,conf,iType,limitcharacterset,similarcharset,equivalentcharset);
+	recognizebybinarytree3(hHandle,p,bw,0,imgRect,regstr,conf,iType);
+	if(imgRect.empty()||regstr.empty())
+		return false;
+	for (int i =0;i<regstr.size();++i )
+	{
+		OcrRectResult temp;
+		tstring wstr;
+		Ascii2WideString( regstr[i], wstr );
+		temp.strResult = wstr;
+		for (int j = 0; j<10;++j)
+		{
+			if(conf.size()>0&&j<conf[i].size())
+			{
+				temp.dbConfi.push_back(conf[i].at(j));
+
+			}
+			else
+				temp.dbConfi.push_back(0);
+
+		}
+		SHAPE_POINT TLPoint,BRPoint;
+		TLPoint.x = imgRect[i].x;
+		TLPoint.y = imgRect[i].y;
+		BRPoint.x = imgRect[i].x+imgRect[i].width-1;
+		BRPoint.y = imgRect[i].y+imgRect[i].height-1;
+
+		temp.imgRect.tTopLeft = TLPoint;
+		temp.imgRect.tButtomRight = BRPoint;
+		regResult.vecOcrRectResult.push_back(temp);
+
+	}
+
+	return true;
+}
+
+//基于联通域分析的多行交错文字的切分识别方法
+SegAndReg_DLL_API bool SegAndReg3(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+{
+	stOcrRectList tOcrRectList;
+	stLineSegmentationParam m_tLineSegmentationParam;
+	initialSegmentationParam(m_tLineSegmentationParam);
+	Mat tImage_copy = tImage.clone();
+	Mat tBwChar_copy = tBwChar.clone();
+	Mat tconnMat;
+	RECTS tRects;
+	if(!ProcessTaxType(tImage_copy,tBwChar_copy,tRects))
+		return false;
+	SegmentAllRect(hHandle, iType, p,tImage_copy,tBwChar_copy,tRects,tOcrRectList);
+	if(tOcrRectList.empty())
+		return false;
+	for (int i =0;i<tOcrRectList.size();++i)
+	{
+		OcrRectResult temp;
+		temp.imgRect = tOcrRectList[i].tRect;
+		temp.strResult = tOcrRectList[i].strOcrResult;
+		for (int j = 0; j<10;++j)
+		{
+			if(j<tOcrRectList[i].strOcrResult.size())
+			{
+				//double dmin =1-(double)tOcrRectList[i].lDmin[j]/10000;
+				double dmin = tOcrRectList[i].dbConfidence;
+				temp.dbConfi.push_back(dmin);
+
+			}
+			else
+				temp.dbConfi.push_back(0.0);
+
+		}
+		Exchange_Result(temp);
+		regResult.vecOcrRectResult.push_back(temp);
+	}
+
+	return true;
+
+}
+
+SegAndReg_DLL_API bool SegAndReg5(long hHandle,int iType,MyOcrEngine p,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+{
+	stOcrRectList tOcrRectList;
+	stLineSegmentationParam m_tLineSegmentationParam;
+	initialSegmentationParam(m_tLineSegmentationParam);
+	Mat tImage_copy = tImage.clone();
+	Mat tBwChar_copy = tBwChar.clone();
+	Mat tconnMat;
+	RECTS tRects;
+	//SegmentLine(hHandle, iType, tBwChar_copy,bw,tOcrRectList);
+	RecogRelatedParts_MixTypeCharBwLineSliceByRecog(tBwChar_copy,tRects);
+	if (tRects.size()==0)
+	{
+		return false;
+	}
+
+	SegmentLine(hHandle, iType, p,tImage_copy,tBwChar_copy,tRects,tOcrRectList);
+	if(tOcrRectList.empty())
+		return false;
+	for (int i =0;i<tOcrRectList.size();++i)
+	{
+		OcrRectResult temp;
+		temp.imgRect = tOcrRectList[i].tRect;
+		temp.strResult = tOcrRectList[i].strOcrResult;
+		for (int j = 0; j<10;++j)
+		{
+			if(j<tOcrRectList[i].strOcrResult.size())
+			{
+				double dmin =1-(double)tOcrRectList[i].lDmin[j]/10000;
+				temp.dbConfi.push_back(dmin);
+
+			}
+			else
+				temp.dbConfi.push_back(0.0);
+
+		}
+		regResult.vecOcrRectResult.push_back(temp);
+	}
+
+	return true;
+
+}
+//单行或多行文字切分识别接口，可通过设置method选择不同的切分与识别方法
+//method=0，基于联通域分析的单行文字切分与识别方法
+//method=1，基于二叉树的单行文字切分与识别方法
+//method=2，针对数字字母混合单行文字的切分与识别方法
+//method=3，针对多行交错文字的切分与识别方法
+SegAndReg_DLL_API bool LineSegAndReg(int method,long hHandle,MyOcrEngine p,int iType,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+{
+	bool issuccess=false;
+	if(0==method)
+	{
+		issuccess = SegAndReg(hHandle,iType,p,tImage,tBwChar,regResult);
+	}
+	else if (1==method)
+	{
+		issuccess = SegAndReg2(hHandle,iType,p,tImage,tBwChar,regResult);
+		//return false;
+	}
+	else if (method==2)
+	{
+		issuccess= MixSegRec(hHandle,iType,p,tImage,tBwChar,regResult);
+		//return false;
+	}
+	else if (method==3)
+	{
+		issuccess = SegAndReg3(hHandle,iType,p,tImage,tBwChar,regResult);
+	}
+	else if (method==4)
+	{
+		issuccess=LineSegRecognitionNumByConnComp(tBwChar,hHandle,p,iType,16,regResult);
+	}
+	else if (method==5)
+	{
+		issuccess=SegAndReg5(hHandle,iType,p,tImage,tBwChar,regResult);
+	}
+	else 
+	{
+		return false;
+	}
+
+	return issuccess;
+}
+//单行或多行文字切分识别接口，可通过设置method选择不同的切分与识别方法（基于NPNTR_ID引擎）
+//method=0，基于联通域分析的单行文字切分与识别方法
+//method=1，基于二叉树的单行文字切分与识别方法
+//method=2，针对数字字母混合单行文字的切分与识别方法
+//method=3，针对多行交错文字的切分与识别方法
+//SegAndReg_DLL_API bool LineSegAndReg_ID(int method,long hHandle,/*MyOcrEngine p,*/int iType,const Mat &tImage,const Mat &tBwChar,LineOcrResult &regResult)
+//{
+//	bool issuccess=false;
+//	if(0==method)
+//	{
+//		issuccess = SegAndReg_ID(hHandle,iType,/*p,*/tImage,tBwChar,regResult);
+//	}
+//	else if (1==method)
+//	{
+//		//issuccess = SegAndReg2_ID(hHandle,iType,/*p,*/tImage,tBwChar,regResult);
+//		//return false;
+//	}
+//	else if (method==2)
+//	{
+//		//issuccess= MixSegRec(hHandle,iType,p,tImage,tBwChar,regResult);
+//		//return false;
+//	}
+//	else if (method==3)
+//	{
+//		//issuccess = SegAndReg3(hHandle,iType,p,tImage,tBwChar,regResult);
+//	}
+//	else if (method==4)
+//	{
+//		//issuccess=LineSegRecognitionNumByConnComp(tBwChar,hHandle,p,iType,16,regResult);
+//	}
+//	else if (method==5)
+//	{
+//		//issuccess=SegAndReg5(hHandle,iType,p,tImage,tBwChar,regResult);
+//	}
+//	else 
+//	{
+//		return false;
+//	}
+//
+//	return issuccess;
+//}
+}

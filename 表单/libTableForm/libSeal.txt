@@ -1,0 +1,1145 @@
+#include "stdafx.h"
+#include "libSeal.h"
+
+namespace iSeal{
+
+float get_thres_v(Mat &gray, float rate)
+{
+	vector<float>	hist(1000,0);
+	vector<float>	integral_hist(1000,0);
+	for (int r = 0; r < gray.rows; ++r)
+	{
+		for (int c = 0; c < gray.cols; ++c)
+		{
+			++hist[gray.at<float>(r, c)];
+		}
+	}
+	integral_hist[0] = hist[0];
+
+	float v = gray.rows * gray.cols * rate;
+
+	for (int i = 1; i < hist.size(); ++i)
+	{
+		integral_hist[i] += integral_hist[i-1] + hist[i];
+
+		if (integral_hist[i] >= v)
+		{
+			return i;
+		}
+	}
+
+	return 999;
+}
+
+void filter_im_get_gray(Mat im, Mat &gray)
+{
+	double min_val, max_val;
+	Mat im_cp = im.clone();
+	if (im.channels() == 3)
+	{
+		cvtColor(im, gray, CV_BGR2GRAY);
+		vector<Mat> im_vec;
+		split(im_cp, im_vec);
+		Mat m1 = abs(im_vec[0] - im_vec[1]);
+		Mat m2 = abs(im_vec[2] - im_vec[1]);
+		Mat m3 = abs(im_vec[2] - im_vec[0]);
+
+		m3 = max(m3, max(m1, m2));
+		gray.convertTo(gray, CV_32FC1);
+		m3.convertTo(m3, CV_32FC1);
+		gray = gray + m3;
+
+		float thres_v = get_thres_v(gray, 0.9);
+		gray = min(gray, thres_v);
+		normalize(gray, gray, 0, 255, CV_MINMAX, CV_8UC1);
+	}
+	else if(im.channels() == 1)
+	{
+		gray = im.clone();
+	}
+}
+
+
+void SealRemove_RemoveRedByRgb(Mat &srcColor, double fEnhance, Mat &dstGray)
+{
+	if (srcColor.channels()!=3)
+	{
+		return;
+	}
+
+	fEnhance = fEnhance <= 0 ? 0.5 : fEnhance;
+
+	vector<Mat> mv;
+	split(srcColor,mv);
+
+	dstGray = mv[2] + abs(mv[2] - mv[0]) * fEnhance;
+
+}
+
+void SealRemove_RemoveBlueByRgb(Mat &srcColor, double fEnhance, Mat &dstGray)
+{
+	if (srcColor.channels()!=3)
+	{
+		return;
+	}
+
+	fEnhance = fEnhance <= 0 ? 0.5 : fEnhance;
+
+	vector<Mat> mv;
+	split(srcColor,mv);
+
+	dstGray = mv[0] + abs(mv[0] - mv[2]) * fEnhance;
+}
+
+/// 获取均值图像和标准差图像
+int getMeanStd(Mat src, Mat& matMeanImage, Mat& matStdImage, const int nWinWidth, const int nWinHeigh)
+{
+	if(!src.data)
+	{
+		return -1;
+	}
+
+	if (src.channels()>1)
+	{
+		Mat matGrayImage;
+		cvtColor(src,matGrayImage,CV_BGR2GRAY);
+		matGrayImage.assignTo(src);
+		matGrayImage.release();
+	}
+
+	Mat meanKernel = Mat::ones(nWinHeigh,nWinWidth,CV_64F)/(nWinHeigh*nWinWidth);
+	src.convertTo(src,CV_64F);
+	filter2D(src,matMeanImage,-1,meanKernel);	
+
+	Mat matSquareImage(src.size(),CV_64F);
+	pow(src,2,matSquareImage);
+
+	Mat matSquareMeanImage,matMeanSquareImage;
+	filter2D(matSquareImage,matSquareMeanImage,-1,meanKernel);	
+
+	pow(matMeanImage, 2, matMeanSquareImage);
+	pow(matSquareMeanImage - matMeanSquareImage, 0.5, matStdImage);
+
+	return 0;
+}
+bool Binarization_Sauvola(Mat matImage, Mat& matBW_image, const int nWindowWidth, const int nWindowHeight, const double k, const int nDivideR)
+{
+	if (matImage.channels()>1)
+	{
+		Mat matGrayImage;
+		cvtColor(matImage,matGrayImage,CV_BGR2GRAY);
+		matGrayImage.assignTo(matImage);
+		matGrayImage.release();
+	}
+
+	Mat matMeanImage(matImage.size(),CV_64F),matStdImage(matImage.size(),CV_64F);
+	getMeanStd(matImage,matMeanImage, matStdImage, nWindowWidth, nWindowHeight);
+
+	Mat matThresImage;
+	matThresImage = matMeanImage.mul((matStdImage / nDivideR - 1) * k + 1);
+	matThresImage.convertTo(matThresImage,matImage.type());
+	compare(matImage,matThresImage,matBW_image,CMP_GT);
+
+	return true;
+}
+
+
+bool SauvolaBw(Mat &tImage,Mat &tBw)
+{
+	int iRet=0;
+
+	Mat tImageGray = tImage.clone();
+
+	if ( tImage.channels() == 3 )
+	{
+		cvtColor(tImage, tImageGray, CV_BGR2GRAY);
+	}
+
+	Mat tBwReverse(tImageGray.size(),tImageGray.type());
+
+	Binarization_Sauvola(tImageGray,tBwReverse,31,31,0.2,128);
+
+	tBw = 255 - tBwReverse;
+	return true;
+}
+
+
+
+/// 提取特征颜色的印章
+int GetColorSeal(const Mat& _tSrcImg, int tSealColor, Mat& tSealImg, int threshold_val)
+{
+	Mat tSrcImg;
+	resize(_tSrcImg, tSrcImg, Size(_tSrcImg.cols / 3, _tSrcImg.rows / 3), 0, 0, INTER_LINEAR);
+
+	tSealImg = Mat::zeros(tSrcImg.size(), CV_8UC1);
+	for (int i = 0; i < tSrcImg.cols; ++i)
+	{
+		for (int j = 0; j < tSrcImg.rows; ++j)
+		{
+			Vec3b pix = tSrcImg.at<Vec3b>(j, i);
+			uchar b = pix[0];
+			uchar g = pix[1];
+			uchar r = pix[2];
+			int tmp;
+			if (tSealColor != DETAIL_BLUE_SEAL && tSealColor != ROUGH_BLUE_SEAL)
+			{
+				tmp = r - MIN(b, g);
+			} 
+			else
+			{
+				tmp = b - MIN(r, g);
+			}
+
+			if (tmp > threshold_val)
+			{
+				tSealImg.at<uchar>(j, i) = 255;
+			}
+		}
+	}
+	resize(tSealImg.clone(), tSealImg, _tSrcImg.size(), 0, 0, INTER_NEAREST);
+	return 0;
+}
+
+void BgMean(Mat &tImage, Mat &tBw, Mat &hsv,int iFrontVal,vector<double> &tMeanVals,double &v_mean)
+{
+	int iBgCount = tBw.rows*tBw.cols - countNonZero(tBw);
+
+	int R=0,G=0,B=0;
+	double R_MEAN=0,G_MEAN=0,B_MEAN=0;
+	double V=0.0;
+	for ( int i=0; i<tImage.rows; i++)
+	{
+		Vec3b*data = (Vec3b *)tImage.ptr<Vec3b>(i);
+		for ( int j=0; j<tImage.cols; j++)
+		{
+			if ( tBw.at<uchar>(i,j) != iFrontVal )
+			{
+ 				uchar blue = data[j][0];
+ 				uchar green = data[j][1];
+ 				uchar red = data[j][2];
+				B = B + blue;
+				G = G +green;
+				R = R + red;
+				Vec3f intensity1=hsv.at<Vec3f>(i,j);
+				double v=intensity1.val[2];
+				V=V+v;
+			}
+
+		}
+	}
+
+	B_MEAN = (double)B / (255*iBgCount);
+	R_MEAN = (double)R / (255*iBgCount);
+	G_MEAN = (double)G / (255*iBgCount);
+	v_mean=(double)V/iBgCount;
+	tMeanVals.push_back(B_MEAN);
+	tMeanVals.push_back(G_MEAN);
+	tMeanVals.push_back(R_MEAN);
+
+	return;
+
+}
+void ConnComponent(Mat &tBw,int iPixelTh,vector<Rect>&Rect1,bool bFill,uchar cFillVal,Mat &tFilledImg)
+{
+	vector<vector<Point>> contours;
+	vector<Vec4i> hierarchy;
+	Mat tBwImageTmp;
+	tBw.copyTo(tBwImageTmp);
+
+	findContours(tBwImageTmp, contours , hierarchy , CV_RETR_TREE , CV_CHAIN_APPROX_SIMPLE,Point(0, 0)); //查找连通区域
+
+
+	vector<vector<Point> > contours_poly( contours.size() );
+	vector<Rect> boundRect( contours.size() );
+
+
+	for( int i = 0; i < contours.size(); i++ )
+	{
+		approxPolyDP( Mat(contours[i]), contours_poly[i], 3, true );
+		boundRect[i] = boundingRect( Mat(contours_poly[i]) );////返回矩形边界点的坐标
+		// minEnclosingCircle( contours_poly[i], center[i], radius[i] );
+	}
+	Rect1=boundRect;
+	return;
+}
+
+void RedByColor(Mat &tImageHsv,double dbHTh1,double dbHTh2,double dbVTh,int iFrontVal,Mat &tRedBw)
+{
+	Mat tBw = Mat::zeros(tImageHsv.rows,tImageHsv.cols,CV_8UC1);
+
+	double h,s,v;
+
+	for ( int i=0; i<tImageHsv.rows; i++)
+	{
+		Vec3f *data =(Vec3f*)tImageHsv.ptr(i);
+		uchar* data1= tBw.ptr<uchar>(i);
+		for ( int j=0; j<tImageHsv.cols; j++)
+		{
+			h=data[j][0];
+			s=data[j][1];
+			v=data[j][2];
+
+			if (h=!0&&s!=0)  //同时为0代表为灰度图（修改于7.26，有的图虽然为3通道，但是本质为灰度图）
+			{
+				if ((h<dbHTh1 || h>dbHTh2) && (v>dbVTh)) 
+				{
+					//tBw.at<uchar>(i,j) = uchar(iFrontVal);
+					data1[j] =uchar(iFrontVal);
+
+				}
+			}
+
+		}
+	}
+	tRedBw = tBw;
+	return;
+}
+
+///////////求印章覆盖部分v的均值与背景字v的均值///////////////////////////////
+bool ReEstimateParameters_Red(Mat &tImage, Mat &tImageHsv, Mat &tPreRedBw,Mat &seal,int iFrontVal, vector<double> tMeanVals,vector<double>&dbvalue)
+{
+	
+	bool bRet=false; 
+	double dbValue=0;
+	int iPixelTh = 100;
+	int k=tImage.channels();
+
+	int iHeight = tImage.rows;
+	int iWidth  = tImage.cols;
+
+	vector<Rect> tRects;
+	bool bFill = false;
+	uchar cFillVal = 0; 
+	Mat tFilledImg;
+	Mat tPreRedBw1;
+	tPreRedBw.copyTo(tPreRedBw1);
+	ConnComponent(tPreRedBw1,iPixelTh,tRects,bFill,cFillVal,tFilledImg);
+	
+	Mat tSubImage,tSubImageHsv,tSubBw;
+	Mat cutimage;
+	Mat cuttpred;
+	int maxarea=10;
+	Rect M;
+	for (int i=0;i<tRects.size();i++)
+	{
+		int xs=tRects[i].x;
+		int ys=tRects[i].y;
+		int width=tRects[i].width;
+		int height=tRects[i].height; 
+		////连通域大小判断/////
+		int area=width*height;
+
+		if (area>maxarea)
+		{
+			M=tRects[i];
+			maxarea=area;
+		}
+	}//////此部分为新加入的
+	if (M.width==0||M.height==0) //如果M不存在
+	{
+		return false;
+	}
+	tImage(Range(M.y,M.y+M.height),Range(M.x,M.x+M.width)).copyTo(tSubImage);
+	seal=tSubImage;
+	tImageHsv(Range(M.y,M.y+M.height),Range(M.x,M.x+M.width)).copyTo(tSubImageHsv);
+	
+	tPreRedBw(Range(M.y,M.y+M.height),Range(M.x,M.x+M.width)).copyTo(cuttpred);
+
+	
+	for (int i=0; i<tSubImage.rows; i++ )
+	{
+		Vec3b*data = (Vec3b *)tSubImage.ptr<Vec3b>(i);
+		for (int j=0; j<tSubImage.cols; j++ )
+		{
+			if ( tPreRedBw.at<uchar>(i+M.y,j+M.x) == (uchar)iFrontVal )
+			{
+
+				data[j][0] = (uchar)(tMeanVals[0]*255);
+				data[j][1] = (uchar)(tMeanVals[1]*255);
+				data[j][2] = (uchar)(tMeanVals[2]*255);
+			}
+		} 
+	}
+	
+	bRet = SauvolaBw(tSubImage,tSubBw);//tSubImage1为印章连通域部分第一次去除印章部分剩余的背景文字部分
+
+	if (bRet==false)
+	{
+		Mat kk=Mat::zeros(tSubImage.rows, tSubImage.cols,CV_8UC1);
+
+		tSubBw=kk;
+	}
+
+	double dbMeanV1 = 0;
+	double dbMeanH1 =0;
+	double dbMeanS1 =0;
+	int iCount1 = countNonZero(cuttpred);//印章部分的二值化图
+	if (iCount1>0)
+	{
+		for (int m=0;m<cuttpred.rows;m++)
+		{
+			Vec3f *data = (Vec3f *)tSubImageHsv.ptr<Vec3f>(m);
+			for (int n=0;n<cuttpred.cols;n++)
+			{
+				if (cuttpred.at<uchar>(m,n)==255)
+				{
+					dbMeanV1 +=data[n][2];
+					dbMeanS1 +=data[n][1];
+					dbMeanH1 +=data[n][0];
+
+				}
+			}
+		}
+		dbMeanV1 = dbMeanV1 / iCount1;
+		dbMeanS1 = dbMeanS1 / iCount1;
+		dbvalue.push_back(dbMeanV1);
+		dbvalue.push_back(dbMeanS1);//////印章部分V,S的均值(此时的印章也包含了部分覆盖住的文字)
+		
+	}
+	else
+	{
+		return false;
+	}
+	int iCount = countNonZero(tSubBw);
+	double dbMeanV = 0;
+	double dbMeanH=0;
+	double dbMeanS=0;
+
+	if ( iCount >0)
+	{
+
+		for (int i=0; i<tSubImageHsv.rows; i++ )
+		{
+
+			Vec3f *data = (Vec3f *)tSubImageHsv.ptr<Vec3f>(i);
+			for (int j=0; j<tSubImageHsv.cols; j++ )
+			{
+
+				if ( tSubBw.at<uchar>(i,j) == (uchar)iFrontVal )//计算的是去除印章部分以及部分覆盖住的文字后（仅仅留下文字部分）的hsv分量
+				{
+
+					dbMeanV +=data[j][2];
+					dbMeanS +=data[j][1];
+					dbMeanH +=data[j][0];
+
+				}
+			}
+
+		}
+		dbMeanV = dbMeanV / iCount;
+		dbMeanS  =dbMeanS/iCount;
+		dbvalue.push_back(dbMeanV);
+		dbvalue.push_back(dbMeanS);
+		
+	}
+	else
+	{
+
+		return false;
+	}	
+	return true;
+}
+void RedByColorNew( Mat &tImageHsv,double dbHTh1,double dbHTh2,vector<double> sealvalue,double dbParameter,int iFrontVal,Mat &tRedBw)
+{
+	Mat tBw = Mat::zeros(tImageHsv.rows,tImageHsv.cols,CV_8UC1);
+
+	double h=0,s=0,v=0;
+
+	for ( int i=0; i<tImageHsv.rows; i++)
+	{
+		Vec3f* data=(Vec3f*)tImageHsv.ptr(i);
+		uchar* data1= tBw.ptr<uchar>(i);
+		for ( int j=0; j<tImageHsv.cols; j++)
+		{
+// 			h=data[j][0];
+// 			s=data[j][1];
+// 			v=data[j][2];
+			Vec3f intensity = tImageHsv.at<Vec3f>(i,j);
+			h = intensity.val[0];
+			s = intensity.val[1];
+			v = intensity.val[2];
+			if ( (h<60 || h>300) &&/*(s>(sealvalue[1]+sealvalue[3])/2)&& */(v>(sealvalue[2]+sealvalue[0])/2-dbParameter) ) //已提交版本没有（double），后面-0.15
+			{
+				//tBw.at<uchar>(i,j) = uchar(iFrontVal);
+				data1[j]=uchar(iFrontVal);
+			}
+		}
+	}
+	tRedBw = tBw;	
+}
+
+#define H_MIN   (60)
+#define H_MAX   (300)
+#define V_MIN   (0.5)
+#define WIN_SIZE (11)
+int RemoveRed(Mat &tImage,Mat tBw,double dbParameter,Mat &tRemove,Mat &tRed_bina)
+{
+	Mat tImageHsv;
+	tImage.convertTo(tImageHsv,CV_32FC3,(double)1/255);
+	cvtColor(tImageHsv, tImageHsv, CV_BGR2HSV);
+	int iFrontVal = 255;
+	Mat tPreRedBw;
+	RedByColor(tImageHsv,H_MIN,H_MAX,V_MIN,iFrontVal,tPreRedBw);
+
+	vector<double> tMeanVals;
+	double v_mean;
+	BgMean(tImage,tBw,tImageHsv,iFrontVal,tMeanVals,v_mean);
+	Mat seal1;
+	vector<double> sealvalue;
+
+	bool seal_ret=false;
+
+	tRed_bina =Mat::zeros(tImage.rows,tImage.cols,CV_8UC1);
+	seal_ret=ReEstimateParameters_Red(tImage,tImageHsv,tPreRedBw,seal1,iFrontVal,tMeanVals,sealvalue);
+
+	if (seal_ret==false)   //没有检测到红色印章  (修改于7.26)
+	{
+		tImage.copyTo(tRemove);
+		//tImage.copyTo(tRed_bina);
+		return 0;
+	}
+
+	Mat tRedBw; 
+
+
+	RedByColorNew(tImageHsv,H_MIN,H_MAX,sealvalue,dbParameter,iFrontVal,tRedBw);
+	tRed_bina=tRedBw;
+
+	tImage.copyTo(tRemove);
+	for ( int i=0; i<tImage.rows; i++)
+	{
+	   Vec3b *outdata=(Vec3b*)tRemove.ptr(i);
+		for ( int j=0; j<tImage.cols; j++)
+		{
+			if ( tRedBw.at<uchar>(i,j) == iFrontVal )
+			{
+				/*tRemove.at<Vec3b>(i,j)[0]=(uchar)(tMeanVals[0]*255);
+				tRemove.at<Vec3b>(i,j)[1]=(uchar)(tMeanVals[1]*255);
+				tRemove.at<Vec3b>(i,j)[2]=(uchar)(tMeanVals[2]*255);*/
+				outdata[j][0]=(uchar)(tMeanVals[0]*255);
+				outdata[j][1]=(uchar)(tMeanVals[1]*255);
+				outdata[j][2]=(uchar)(tMeanVals[2]*255);
+			}
+
+		}
+	}
+	return 1;
+}
+
+#define  MIN_WIDTH   (50)
+bool ReEstimateParameters_Blue( Mat &tImage, Mat &tImageHsv, Mat &tPreBlueBw,vector<Rect> &rects,int iFrontVal, vector<double> &tMeanVals,vector<double>&dbvalue)
+{
+	bool bRet=false; 
+
+	int iPixelTh = 100;
+	int k=tImage.channels();
+
+	int iHeight = tImage.rows;
+	int iWidth  = tImage.cols;
+
+	vector<Rect> tRects;
+	bool bFill = false;
+	uchar cFillVal = 0; 
+	Mat tFilledImg;
+	Mat tPreBlueBw1;
+	tPreBlueBw.copyTo(tPreBlueBw1);
+
+	ConnComponent(tPreBlueBw1,iPixelTh,tRects,bFill,cFillVal,tFilledImg);
+	Mat tSubImage,tSubImageHsv,tSubBw;
+	int maxarea=10;
+	Rect M;
+	for (int i=0;i<tRects.size();i++)
+	{
+		int xs=tRects[i].x;
+		int ys=tRects[i].y;
+		int width=tRects[i].width;
+		int height=tRects[i].height; 
+		/*************/
+		////连通域大小判断/////
+		int area=width*height;
+
+		if (area>maxarea)
+		{
+			M=tRects[i];
+			maxarea=area;
+		}
+		if (width*height>MIN_WIDTH*MIN_WIDTH)
+		{
+			rects.push_back(tRects[i]);
+		}
+	}//////此部分为新加入的
+
+	if (M.width==0||M.height==0) //如果M不存在
+	{
+		return false ;
+	}
+	Mat cutimage;
+	Mat cuttpred;
+	tImage(Range(M.y,M.y+M.height),Range(M.x,M.x+M.width)).copyTo(tSubImage);
+	tImageHsv(Range(M.y,M.y+M.height),Range(M.x,M.x+M.width)).copyTo(tSubImageHsv);
+	
+	tPreBlueBw(Range(M.y,M.y+M.height),Range(M.x,M.x+M.width)).copyTo(cuttpred);
+	//imshow("121",tPreBlueBw);
+	//waitKey();
+	
+	for (int i=0; i<tSubImage.rows; i++ )
+	{
+		Vec3b *data = (Vec3b *)tSubImage.ptr<Vec3b>(i);
+		for (int j=0; j<tSubImage.cols; j++ )
+		{
+			if ( tPreBlueBw.at<uchar>(i+M.y,j+M.x) == (uchar)iFrontVal )
+			{
+				data[j][0] = (uchar)(tMeanVals[0]*255);
+				data[j][1] = (uchar)(tMeanVals[1]*255);
+				data[j][2] = (uchar)(tMeanVals[2]*255);
+			}
+		} 
+	}
+
+	//imshow("222",tSubImage);
+	//waitKey();
+	bRet = SauvolaBw(tSubImage,tSubBw);//tSubImage1为印章连通域部分第一次去除印章部分剩余的背景文字部分
+	if (bRet==false)
+	{
+		Mat kk=Mat::zeros(tSubImage.rows, tSubImage.cols,CV_8UC1);
+
+		tSubBw=kk;
+	}
+	double dbMeanV1 = 0;
+	double dbMeanH1 =0;
+	double dbMeanS1 =0;
+	int iCount1 = countNonZero(cuttpred);//印章部分的二值化图
+
+	if (iCount1>0)
+	{
+		for (int m=0;m<cuttpred.rows;m++)
+		{
+			Vec3f *data = (Vec3f *)tSubImageHsv.ptr<Vec3f>(m);
+			for (int n=0;n<cuttpred.cols;n++)
+			{
+				if (cuttpred.at<uchar>(m,n)==255)
+				{
+					dbMeanV1 +=data[n][2];
+					dbMeanS1 +=data[n][1];
+					dbMeanH1 +=data[n][0];
+				}
+			}
+		}
+		dbMeanV1 = dbMeanV1 / iCount1;
+		dbMeanS1 = dbMeanS1 / iCount1;
+		dbvalue.push_back(dbMeanV1);
+		dbvalue.push_back(dbMeanS1);//////印章部分V,S的均值(此时的印章也包含了部分覆盖住的文字)
+	}
+	else
+	{
+	
+		return false;
+
+	}
+	//imshow("222",tSubBw);
+	//waitKey();
+	int iCount = countNonZero(tSubBw);
+	double dbMeanV = 0;
+	double dbMeanH=0;
+	double dbMeanS=0;
+
+	if ( iCount >0)
+	{
+		for (int i=0; i<tSubImageHsv.rows; i++ )
+		{
+			Vec3f *data = (Vec3f *)tSubImageHsv.ptr<Vec3f>(i);
+
+			for (int j=0; j<tSubImageHsv.cols; j++ )
+			{
+
+				if ( tSubBw.at<uchar>(i,j) == (uchar)iFrontVal )//计算的是去除印章部分以及部分覆盖住的文字后（仅仅留下文字部分）的hsv分量
+				{
+					dbMeanV +=data[j][2];
+					dbMeanS +=data[j][1];
+					dbMeanH +=data[j][0];
+				}
+			}
+
+		}
+		dbMeanV = dbMeanV / iCount;
+		dbMeanS  =dbMeanS/iCount;
+		dbvalue.push_back(dbMeanV);
+		dbvalue.push_back(dbMeanS);
+	}
+	else
+	{
+		
+		return false;
+	}
+	return true;
+}
+void BlueByColorNew( Mat &tImageHsv,double dbHTh1,double dbHTh2,double dbVTh,vector<double> sealvalue,double dbParameter,int iFrontVal,Mat &tBlueBw)
+{
+	Mat tBw = Mat::zeros(tImageHsv.rows,tImageHsv.cols,CV_8UC1);
+
+	double h,s,v;
+
+	for ( int i=0; i<tImageHsv.rows; i++)
+	{
+		Vec3f *data=(Vec3f *)tImageHsv.ptr(i);
+		uchar *data1=(uchar *)tBw.ptr(i);
+		for ( int j=0; j<tImageHsv.cols; j++)
+		{
+			/*Vec3f intensity = tImageHsv.at<Vec3f>(i,j);
+			h = intensity.val[0];
+			s = intensity.val[1];
+			v = intensity.val[2];*/
+			h=data[j][0];
+			s=data[j][1];
+			v=(double)data[j][2];
+			double k=(double)(sealvalue[3]+sealvalue[1])/2;
+			dbVTh=(double)(0.5*(sealvalue[0]+sealvalue[2]));
+			if ( (h>dbHTh1&&h<dbHTh2) && (v>(dbVTh-dbParameter)&&s>k ) )//新增了s分量的判断
+			{
+				//tBw.at<uchar>(i,j) = uchar(iFrontVal);
+				data1[j]= uchar(iFrontVal);
+
+			}
+		}
+	}
+
+	tBlueBw = tBw;
+
+	return;
+}
+void BlueByColor( Mat &tImageHsv,double dbHTh1,double dbHTh2,double dbVTh,double dbSTH,int iFrontVal,Mat &tBlueBw)
+{
+	Mat tBw = Mat::zeros(tImageHsv.rows,tImageHsv.cols,CV_8UC1);
+
+	double h,s,v;
+
+	for ( int i=0; i<tImageHsv.rows; i++)
+	{
+		uchar *data1=(uchar *)tBw.ptr(i);
+		Vec3f *data =(Vec3f*)tImageHsv.ptr(i);
+		for ( int j=0; j<tImageHsv.cols; j++)
+		{
+// 			Vec3f intensity = tImageHsv.at<Vec3f>(i,j);
+// 			h = intensity.val[0];
+// 			s = intensity.val[1];
+// 			v = intensity.val[2];
+			h=data[j][0];
+			s=data[j][1];
+			v=data[j][2];
+			if ( (h>dbHTh1&&h<dbHTh2) && (v>dbVTh)&&(s>dbSTH) ) //新增了s分量的判断
+			{
+				//tBw.at<uchar>(i,j) = uchar(iFrontVal);
+				data1[j] = uchar(iFrontVal);
+
+			}
+		}
+	}
+
+	tBlueBw = tBw;
+
+
+	return;
+}
+int horizontal_projection(Mat inimg,vector<int> &new_zb)
+{
+	Mat img;
+	inimg.copyTo(img);
+
+	medianBlur(img,img,5);//去除一些干扰噪声点的影响
+
+	vector<int>count;
+	for (int i=0;i<img.rows;i++)
+	{
+		int sum=0;
+		for (int j=0;j<img.cols;j++)
+		{
+			if (img.at<uchar>(i,j)==255)
+			{
+				sum=sum+1;
+			}
+		}
+		count.push_back(sum);
+	}
+
+	vector<int> zuobiao;
+	int j=0;
+	for (int i=2;i<count.size()-1;i++)
+	{
+		if (count[i-2]<10&&count[i-1]<10&&count[i]<10&&count[i+1]>=10)
+		{
+			new_zb.push_back(i);
+			j=i;
+			break;
+		}
+	}
+	/****/
+	for (int i=count.size()-1;i>j;i--)
+	{
+		if (count[i]<=10&&count[i-1]>10)
+		{
+			new_zb.push_back(i);
+			break;
+		}
+	}
+	/********/
+	if (new_zb.size()>=2&&new_zb[1]>new_zb[0])
+	{
+
+		/*Mat color;
+		cvtColor(img,color, CV_GRAY2BGR);
+		for (int i=0;i<img.cols-1;i++)
+		{
+			for (int j=0;j<new_zb.size();j++)
+			{
+				line( color, Point( i,new_zb[j]) ,   
+					Point(i+1,new_zb[j]),   
+					Scalar( 0, 0, 255), 1); 
+			}
+		}*/
+		return 0;
+	}
+	else
+	{
+		return -1;
+	}
+
+}
+int vetical_projection(Mat inimg,vector<int> &new_zb)
+{
+	Mat img;
+	inimg.copyTo(img);
+	medianBlur(img,img,3);
+	vector<int>count;
+	for (int i=0;i<img.cols;i++)
+	{
+		int sum=0;
+		for (int j=0;j<img.rows;j++)
+		{
+			if (img.at<uchar>(j,i)==255)
+			{
+				sum=sum+1;
+			}
+		}
+		count.push_back(sum);
+	}
+	vector<int> zuobiao;
+	int j=0;
+	for (int i=0;i<count.size()-2;i++)
+	{
+		if (count[i]<10&&count[i+1]>=10&&count[i+2]>=10)
+		{
+			new_zb.push_back(i);
+			j=i;
+			break;
+		}
+	}
+	/*****/
+	for (int i=count.size()-1;i>j;i--)
+	{
+		if (count[i]<=10&&count[i-1]>10)
+		{
+			new_zb.push_back(i);
+			break;
+		}
+	}
+	/********/
+	if (new_zb.size()>=2&&new_zb[1]>new_zb[0])
+	{
+		return 0;
+	}
+	else
+	{
+		return -1;
+	}
+
+}
+
+int RemoveBlue(Mat &tImage,Mat tBw,double dbParamerter,Mat &tRemove,Mat &tBlue_bina)
+{
+#define H_MIN   (180)
+#define H_MAX   (300)
+#define V_MIN   (0.3)
+#define S_MIN   (0.3)
+
+	int iFrontVal = 255;
+	/*****HSV空间中初步定位蓝色像素点************/
+	Mat tImageHsv;
+	tImage.convertTo(tImageHsv,CV_32FC3,(double)1/255);
+
+	cvtColor(tImageHsv, tImageHsv, CV_BGR2HSV);
+	Mat tPreBlueBw;
+	BlueByColor(tImageHsv,H_MIN,H_MAX,V_MIN,S_MIN,iFrontVal,tPreBlueBw);
+	/***********求背景R/G/B均值******************/
+
+	vector<double> tMeanVals;
+	double v_mean;
+	BgMean(tImage,tBw,tImageHsv,255,tMeanVals,v_mean);
+	
+	/**********估计蓝色像素点v分量的均值***********/
+
+	vector<double>dbValue;
+	vector<Rect>rects;
+
+	bool seal_ret=false;
+
+	tBlue_bina =Mat ::zeros(tImage.rows,tImage.cols,CV_8UC1);
+	seal_ret=ReEstimateParameters_Blue(tImage,tImageHsv,tPreBlueBw,rects,iFrontVal,tMeanVals,dbValue);
+	if (seal_ret==false)
+	{
+		tImage.copyTo(tRemove);
+		return 0;
+	}
+	
+	/********重新定位蓝色像素************/
+	Mat tBlueBw; 
+
+	BlueByColorNew(tImageHsv,H_MIN,H_MAX,S_MIN,dbValue,dbParamerter,iFrontVal,tBlueBw);
+	
+	vector<int> h_coord,v_coord;
+	int ret1=-1,ret2=-1;
+	ret1=horizontal_projection(tBlueBw,h_coord);
+	ret2=vetical_projection(tBlueBw,v_coord);
+	if (ret1==-1)
+	{
+		h_coord.clear();
+		h_coord.push_back(0);
+		h_coord.push_back(tPreBlueBw.rows-1);
+	}
+	if (ret2==-1)
+	{
+		v_coord.clear();
+		v_coord.push_back(0);
+		v_coord.push_back(tPreBlueBw.cols-1);
+	}
+
+	/********************将蓝色像素点用背景均值赋值**************/
+	tImage.copyTo(tRemove);
+
+	tBlue_bina=Mat::zeros(tBlueBw.size(),tBlueBw.type());
+	
+	for ( int i=h_coord[0]; i<h_coord[1]; i++)
+	{
+		uchar *tdata=(uchar *)tBlue_bina.ptr(i);
+		uchar *data=(uchar *)tBlueBw.ptr(i);
+		Vec3b *outdata=(Vec3b*)tRemove.ptr(i);
+		for ( int j=v_coord[0]; j<v_coord[1]; j++)
+		{
+			//if ( blues.at<uchar>(i,j) == iFrontVal )
+			if ( data[j] == iFrontVal )
+			{
+				tdata[j]=data[j];
+				outdata[j][0]=(uchar)(tMeanVals[0]*255);
+				outdata[j][1]=(uchar)(tMeanVals[1]*255);
+				outdata[j][2]=(uchar)(tMeanVals[2]*255);
+
+			}
+		}
+	}
+	return 1;	
+}
+bool SealRemove_RemoveALLByHsv(Mat &tImage, double dbParameterRed, double dbParameterBlue, Mat &tRemoveRed, Mat &tRemoveBlue, Mat &tRedBina, Mat &tBlueBina)
+{
+	bool bRet=false;
+
+	Mat tImageHsvForRed,tImageHsvForBlue;
+
+	tRedBina =Mat ::zeros(tImage.rows,tImage.cols,CV_8UC1);
+
+	tBlueBina =Mat ::zeros(tImage.rows,tImage.cols,CV_8UC1);
+
+	if (tImage.channels()!=3)
+	{
+		tImage.copyTo(tRemoveBlue);
+		tImage.copyTo(tRemoveRed);
+		//tImage.copyTo(tRedBina);
+		//tImage.copyTo(tBlueBina);
+		return false;
+	}
+
+	Mat tImageGray;
+	cvtColor(tImage, tImageGray, CV_BGR2GRAY);
+	Mat tBw;
+	bRet = SauvolaBw(tImageGray,tBw);
+	if ( bRet==false )
+	{
+		tImage.copyTo(tRemoveBlue);
+		tImage.copyTo(tRemoveRed);
+		//tImage.copyTo(tRedBina);
+		//tImage.copyTo(tBlueBina);
+		return false;
+	}
+	int flag0=0,flag1=0;
+	flag0=RemoveBlue(tImage,tBw,dbParameterBlue,tRemoveBlue,tBlueBina);
+	flag1=RemoveRed(tRemoveBlue,tBw,dbParameterRed,tRemoveRed,tRedBina);
+	if (flag0==0&&flag1==0)
+	{
+		tImage.copyTo(tRemoveBlue);
+		tImage.copyTo(tRemoveRed);
+		//tImage.copyTo(tRedBina);
+		//tImage.copyTo(tBlueBina);
+		return false;
+	}
+	return true;
+
+}
+bool SealRemove_RemoveRedByHsv(Mat &tImage,double dbParameterRed,Mat &tRemoveRed,Mat &tRedBina)
+{
+	bool bRet=false;
+
+	Mat tImageHsvForRed,tImageHsvForBlue;
+
+	if (tImage.channels()!=3)
+	{
+		tImage.copyTo(tRemoveRed);
+		tImage.copyTo(tRedBina);
+		return false;
+	}
+
+	Mat tImageGray;
+	cvtColor(tImage, tImageGray, CV_BGR2GRAY);
+	Mat tBw;
+	bRet = SauvolaBw(tImageGray,tBw);
+
+	tRedBina =Mat::zeros(tImage.rows,tImage.cols,CV_8UC1);
+
+	if ( bRet==false )
+	{
+		tImage.copyTo(tRemoveRed);
+		//tImage.copyTo(tRedBina);
+		return false;
+	}
+	int flag=0;
+	flag=RemoveRed(tImage,tBw,dbParameterRed,tRemoveRed,tRedBina);
+	if(flag==1)
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool SealRemove_RemoveBlueByHsv(Mat &tImage, double dbParameterBlue, Mat &tRemoveBlue, Mat &tBlueBina)
+{
+	if (tImage.channels()!=3)
+	{
+		tImage.copyTo(tRemoveBlue);
+		tImage.copyTo(tBlueBina);
+		return false;
+	}
+
+	Mat tImageGray, tBw;
+	cvtColor(tImage, tImageGray, CV_BGR2GRAY);
+	SauvolaBw(tImageGray,tBw);
+	tBlueBina = Mat::zeros(tImage.rows,tImage.cols,CV_8UC1);
+
+	int flag = RemoveBlue(tImage, tBw, dbParameterBlue, tRemoveBlue, tBlueBina);
+	if (flag==1)
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+
+/// 判断是否存在印章
+bool SealRemove_HasSeal(Mat &tImage)
+{
+	Mat img, bina1, bina2, bina0, bina, gray, seal, preimg;
+
+	cvtColor(tImage,preimg,CV_RGB2GRAY);
+
+	SauvolaBw(preimg, bina1);
+	threshold(preimg, bina2,0,255,CV_THRESH_OTSU);//全局二值化滤去正面印章或者其他干扰带来的影响
+	bina2 = 255 - bina2;
+
+	bitwise_and(bina1,bina2,bina0);				
+
+	SealRemove_RemoveRedByRgb(tImage, 1, gray);		//去除红色印章部分
+
+	SauvolaBw(gray,bina);
+	
+	seal=bina0-bina;
+
+	if (countNonZero(seal) < 200)
+	{
+		return false;
+	}
+	else
+	{
+		return true;
+	}
+}
+
+
+void SealRestrain(Mat img,Mat& result,int flag)	//红章为1，蓝章为0   
+{
+	vector<Mat> img_rgb;
+	split(img,img_rgb);
+	Mat blue, green, red;
+	Mat imageBlueDouble, imageGreenDouble, imageRedDouble;
+
+	blue	= img_rgb[0];	blue.convertTo(imageBlueDouble,CV_32FC1); 
+	green 	= img_rgb[1];	green.convertTo(imageGreenDouble,CV_32FC1);
+	red 	= img_rgb[2];	red.convertTo(imageRedDouble,CV_32FC1);
+
+	if (flag == 1)
+	{		
+		Mat gb = imageGreenDouble + imageBlueDouble; 		
+		Mat dif = imageRedDouble - gb/2;
+		Mat dif1(img.rows,img.cols,CV_32FC1);
+		Mat dif2(img.rows,img.cols,CV_32FC1);
+
+		threshold(dif,dif1,0,1,THRESH_TOZERO);		
+		pow(dif1,1.15,dif2);
+		imageRedDouble 	= imageRedDouble + 0.9*dif1;
+		imageGreenDouble = imageGreenDouble + dif2;
+		imageBlueDouble = imageBlueDouble + dif2;
+
+		imageRedDouble.convertTo(red,CV_8UC1);
+		imageGreenDouble.convertTo(green,CV_8UC1);
+		imageBlueDouble.convertTo(blue,CV_8UC1);
+
+		vector<Mat> rgb;
+		rgb.push_back(blue);
+		rgb.push_back(green);
+		rgb.push_back(red);
+
+		merge(rgb, result);
+	}
+	else
+	{
+		Mat rg(img.rows,img.cols,CV_32FC1);
+		rg=imageGreenDouble + imageRedDouble; 
+
+		Mat dif(img.rows,img.cols,CV_32FC1);
+		dif = imageBlueDouble - rg/2;
+		Mat dif1(img.rows,img.cols,CV_32FC1);
+		threshold(dif,dif1,0,1,THRESH_TOZERO);
+		Mat dif2(img.rows,img.cols,CV_32FC1);
+		pow(dif1,1.15,dif2);
+
+		imageBlueDouble = imageBlueDouble + 0.9*dif1;
+		imageGreenDouble = imageGreenDouble + dif2;
+		imageRedDouble = imageRedDouble + dif2;
+
+		imageRedDouble.convertTo(red,CV_8UC1);
+		imageGreenDouble.convertTo(green,CV_8UC1);
+		imageBlueDouble.convertTo(blue,CV_8UC1);
+
+		vector<Mat> rgb;
+		rgb.push_back(blue);
+		rgb.push_back(green);
+		rgb.push_back(red);
+
+		//Mat result;
+		merge(rgb,result);
+	}
+}
+
+
+}

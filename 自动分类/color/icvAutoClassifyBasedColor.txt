@@ -1,0 +1,103 @@
+#include "stdafx.h"
+#include "icvCalcColorFtr.h"
+#include "icvAutoClassifyBasedColor.h"
+
+int icvAutoClassifyBasedGlobalColor(long colorHandle, Mat colorImg, Mat maskImg, vector<ImageTemplate> vecIT, vector<int>& vecIndex, int colorType) {
+	if (colorHandle <= 0 || colorImg.empty() || vecIT.empty() || vecIndex.empty()) {
+		return 0;
+	}
+
+	int nColor;
+	icvColor_calcFtr(colorHandle, colorImg, maskImg, nColor);
+
+	int nMatch = 0;
+	if (colorType == BACK_COLOR) {
+		for (int i = 0; i < vecIndex.size(); i++) {
+			if (vecIT[vecIndex[i]].gBackColor.nColorType != nColor) {
+				vecIndex[i] = -1;
+				continue;
+			}
+			nMatch++;
+		}
+	} else if (colorType == LINE_COLOR) {
+		for (int i = 0; i < vecIndex.size(); i++) {
+			if (vecIT[vecIndex[i]].gLineColor.nColorType != nColor) {
+				vecIndex[i] = -1;
+				continue;
+			}
+			nMatch++;
+		}
+	} else {
+		LOG(ERROR) << "Not Supported, Please Check Param" << colorType;		
+	}
+
+	vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());
+
+	return nMatch;
+}
+
+int icvAutoClassifyBasedLocalColor(long colorHandle, Mat colorImg, vector<ImageTemplate> vecIT, vector<int>& vecIndex) {
+	if (colorHandle <= 0 || colorImg.empty() || vecIT.empty() || vecIndex.empty()) {
+		return 0;
+	}
+
+	int nMatch = 0;
+	for (int i = 0; i < vecIndex.size(); i++) {
+		Rect roi = Rect(0,0,0,0);
+		//vecIT[vecIndex[i]].tLogos[0].AccField;
+		
+		/// <颜色判断>
+		if (!icvFindRedRegion(colorImg, roi, 200)){
+			vecIndex[i] = -1;
+			continue;
+		}
+		nMatch++;
+	}
+
+	vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());
+	return nMatch;
+}
+
+/// <经Size、Form、Keyword匹配后仍无法分类的图像后处理>
+/// <税务登记证-国税和地税的区分。两者的区别在于是否存在红色印章>
+/// <代理身份证核查与身份证核查之间的判别，根据有无红色区域判断>
+/// <基于该特征的粗分类暂未完全定型，故暂时放置在此，待定型后移动到color中>
+void icvAutoClassifyRedRegion(Mat colorImg, vector<ImageTemplate> vecIT, vector<int>& vecIndex, int keyIndex, int refIndex) {
+	bool bFindRed = false;
+	ImageTemplate curIT = vecIT[keyIndex];
+	Rect roi = Rect(0,0,0,0);
+
+	/// <确定红色关键区域>
+	if (curIT.tName.find("代理人身份证") != string::npos) {
+		if (curIT.tLogos.size()) {
+			roi = curIT.tLogos[0].AccField;
+		}
+	} else if (curIT.tName.find("税务登记证（国税）") != string::npos) {
+		Point refPt = curIT.ReferPoint;
+		Rect roi;
+		if (refPt.x == 0 && refPt.y == 0) {
+			roi.x	   = colorImg.cols * 0.05;
+			roi.y	   = colorImg.rows * 0.02;
+			roi.width  = colorImg.cols * 0.35;
+			roi.height = colorImg.rows * 0.35;
+		} else {
+			roi.x	   = refPt.x;
+			roi.y	   = refPt.y;
+			roi.width  = colorImg.cols * 0.4;
+			roi.height = colorImg.rows * 0.3;
+		}		
+	}
+
+	/// <判断是否存在红色标记>
+	if (icvFindRedRegion(colorImg, roi, 200)) {
+		bFindRed = true;
+	}
+
+	/// <根据检测结果进行相应返回>
+	vecIndex.clear();
+	if (bFindRed) {				
+		vecIndex.push_back(keyIndex);
+	} else {
+		vecIndex.push_back(refIndex);
+	}
+}

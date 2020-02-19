@@ -1,0 +1,36 @@
+// 下列 ifdef 块是创建使从 DLL 导出更简单的
+// 宏的标准方法。此 DLL 中的所有文件都是用命令行上定义的 FIV_TABLE_OCR_EXPORTS
+// 符号编译的。在使用此 DLL 的
+// 任何其他项目上不应定义此符号。这样，源文件中包含此文件的任何其他项目都会将
+// FIV_TABLE_OCR_API 函数视为是从 DLL 导入的，而此 DLL 则将用此宏定义的
+// 符号视为是被导出的。
+#ifdef FIV_TABLE_OCR_EXPORTS
+#define FIV_TABLE_OCR_API __declspec(dllexport)
+#else
+#define FIV_TABLE_OCR_API __declspec(dllimport)
+#endif
+
+enum{
+	FIV_TABLE_CHAR_NUMPUNC,
+	FIV_TABLE_CHAR_CHNNUMPUNC,
+	FIV_TABLE_CHAR_NAMSEXAGE,	// 针对测评表添加的姓名、性别、年龄
+	FIV_TABLE_CHAR_NAMSEXNAT,	// 针对测评表添加的姓名、性别、民族
+	FIV_TABLE_CHAR_TIMEAGE,		// 针对测评表添加的日期、年龄
+	FIV_TABLE_CHAR_FIELDBOX,	// 针对测评表添加的域识别，方框勾画
+};
+
+
+FIV_TABLE_OCR_API long fIv_table_ocr_init(string modelPath);
+
+FIV_TABLE_OCR_API void fIv_table_ocr_uninit(long& handle);
+
+FIV_TABLE_OCR_API int  fIv_table_ocr_form(long handle, int nType, Mat bwImg, string& str, float& dcf);
+
+
+#ifndef FIV_TABLE_OCR_EXPORTS
+#ifdef _DEBUG
+#pragma comment(lib, "fiv_table_ocrD.lib")
+#else
+#pragma comment(lib, "fiv_table_ocr.lib")
+#endif
+#endif

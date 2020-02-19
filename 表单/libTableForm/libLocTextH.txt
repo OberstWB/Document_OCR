@@ -1,0 +1,72 @@
+#ifndef _LIB_LOC_TEXT_H_
+#define _LIB_LOC_TEXT_H_
+
+#include "libTableFormRecognition.h"
+
+namespace iLocText{
+
+	///// 表单类型
+	//typedef enum{
+	//	UNKNOWN = 0,
+	//	FORM_NORM = 1,
+	//	FORM_ANY = 2,
+	//	TABLE = 4,
+	//}iTableFormType;
+
+	typedef struct _tagSegPart{
+		int nStart;
+		int nEnd;
+
+		_tagSegPart(int _start, int _end)
+		{
+			this->nStart = _start;
+			this->nEnd = _end;
+		}
+	}SegPart;
+
+	/// 直方图划分
+	void segHist(vector<int> vecHist, float fThresh, vector<SegPart>& vSegPart);
+
+	void fillEdge(Mat &roiGray, Mat refFill);
+
+	/// 边缘填充，黑底白字
+	void fillEdge(Mat& bwImg);
+
+	///边缘填充，灰度图黑边
+	void grayFillEdge(Mat& gray);
+
+	/// 列直方图投影
+	void calcColHist(Mat bwImg, vector<int>& colHist);
+
+	/// 行直方图投影
+	void calcRowHist(Mat bwImg, vector<int>& rowHist);	
+
+	/// 字符划分
+	void splitRectRefDis(Mat src, vector<Rect>& vRect);
+
+	/// 无框线，该表格的定位则需要采用连通域方式进行定位，识别率较高，但是会存在误定位和漏定位
+	void locTableText(Mat& bwImg, vector<Rect>& vCellRect);
+
+	/// 常规表格，即表格的行和列表现为完整性，不会出现中间分离现象，格线长短相等
+	void locStandardFormText(Mat bwImg, vector<Rect>& vCellRect);
+
+	/// copy from 财报中文字定位
+	void locFormText(Mat& src, Mat& bwImg, vector<Rect>& vCellRect);
+
+	/// 非常规表格，集表格的行和列表现存在多样性，更多表现为列线存在分离或者长度不一
+	void locVariFormText(Mat src,  vector<Rect>& vCellRect);
+
+	/// 文字定位通用接口
+	void locTextRect(Mat& gray, Mat& bwImg, vector<Rect>& vCellRect, iTableFormType iType);
+
+	/// 对输出的Rect进行重排序
+	void sortRectAsArray(vector<Rect> vecRects, vector<vector<Rect> > &vecRectArray);
+
+	/// table/form版式判断
+	iTableFormType judgeTableFormType(Mat img);
+
+	///20171129王博添加非标准表格定位（根据全文识别合并单元格的需求）
+	void locValidForm(/*Mat& color, */Mat& gray, Mat&bwImg, vector<Rect>& vCellRect);
+}
+
+#endif

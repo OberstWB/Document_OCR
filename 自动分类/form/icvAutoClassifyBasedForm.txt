@@ -1,0 +1,248 @@
+#include "stdafx.h"
+#include "icvAutoClassifyBasedForm.h"
+#include "icvCalcFormFtr.h"
+
+
+float MatchingLine(int w1, int h1, int w2, int h2) {
+	if (0==w1 || 0==w2||0==h1 || 0==h2) {
+		return 0;
+	}
+
+	float maxw = ((float)max(w2, w1)/10);
+	float maxh = ((float)max(h2, h1)/10);
+	if (maxw==0 ||maxh==0) {
+		return 0;
+	}
+	float wS = 1 - (float)abs(w2 - w1)/maxw ;
+	float hS = 1 - (float)abs(h2 - h1)/maxh ;
+	
+	float cof = (hS + wS)/2;
+	if (cof<0) {
+		cof =0;
+	} else {
+		cof = cof*100;
+	}
+
+	return cof;
+}
+
+/// Form外框线四个角点特征匹配统计得分
+/// 实际上这里计算的是宽高比，宽高比相当则说明匹配的上
+int outLineMatch(FormInfo Form1, FormInfo Form2, float& formWratio, float& formHratio) {
+	if (0 == Form1.FormRatio|| 0 == Form2.FormRatio) {
+		return 0;
+	}
+
+	float RatioCof = abs(Form1.FormRatio - Form2.FormRatio)/(max(Form1.FormRatio, Form2.FormRatio));
+
+	if (RatioCof>0.15) {
+		RatioCof = 0;
+	} else if (RatioCof<0.001) {
+		RatioCof = 100;
+	} else {
+		RatioCof = (1-RatioCof)*100;
+	}
+
+	int width1  = (Form1.FormPoints[1].x - Form1.FormPoints[0].x + Form1.FormPoints[3].x - Form1.FormPoints[2].x) * 0.5;
+	int height1 = (Form1.FormPoints[2].y - Form1.FormPoints[0].y + Form1.FormPoints[3].y - Form1.FormPoints[1].y) * 0.5;
+	int width2  = (Form2.FormPoints[1].x - Form2.FormPoints[0].x + Form2.FormPoints[3].x - Form2.FormPoints[2].x) * 0.5;
+	int height2 = (Form2.FormPoints[2].y - Form2.FormPoints[0].y + Form2.FormPoints[3].y - Form2.FormPoints[1].y) * 0.5;
+
+
+	if (0 == width2 || 0 == height1 || 0 == width1 || 0 == height2) {
+		return 0;
+	}
+	if (width1 && height1) {
+		formWratio = (float)width2 / width1;
+		formHratio = (float)height2 / height1;
+	}
+
+	float RatioCof3 = MatchingLine(width1, height1, width2, height2);
+	return RatioCof * 0.87 + RatioCof3 * 0.13 + 0.5;
+}
+
+/// 外边框与内部线的交点匹配，通过交点到左上角参考点与高或宽的比例来判断该点是否匹配
+/// 内部线交点匹配，
+/// 事实上边界点和内部交点的特征匹配计算的是两者之间在相对坐标上能否匹配，根据匹配个数计算得分
+float InnerLineMatch(FormInfo Form1 ,FormInfo Form2) {
+	int width1  = Form1.FormPoints[1].x - Form1.FormPoints[0].x;
+	int height1 = Form1.FormPoints[2].y - Form1.FormPoints[0].y;
+	int width2  = Form2.FormPoints[1].x - Form2.FormPoints[0].x;
+	int height2 = Form2.FormPoints[2].y - Form2.FormPoints[0].y;
+
+	if (0 == height1 || 0 == width1 || 0 == height2 || 0 == width2) {
+		return 0;
+	}
+
+	vector<int> lenght1;
+	lenght1.push_back(height1);
+	lenght1.push_back(width1);
+	lenght1.push_back(height1);
+	lenght1.push_back(width1);
+
+	vector<int> lenght2;
+	lenght2.push_back(height2);
+	lenght2.push_back(width2);
+	lenght2.push_back(height2);
+	lenght2.push_back(width2);
+
+	vector<vector<float>> ratios1;
+	vector<vector<float>> ratios2;
+
+	// 外边框与内部线的交点匹配
+	int interP1 = 0;
+	int interP2 = 0;
+
+	vector<int> MatchNum;
+	int MatchNums=0;
+	for (int i=0;i<4;i++) {
+		MatchNum.push_back(0);
+		interP1 += Form1.InterPoints[i].size();
+		vector<float> ratios;
+		for (int j=0;j<Form1.InterPoints[i].size();j++) {
+			int h = 0;
+			if (i%2) {
+				h = Form1.InterPoints[i][j].x - Form1.FormPoints[0].x;
+			} else {
+				h = Form1.InterPoints[i][j].y - Form1.FormPoints[0].y;
+			}
+			ratios.push_back((float)h/lenght1[i]);
+		}
+		ratios1.push_back(ratios);
+	}
+
+	for (int i=0;i<4;i++) {
+		interP2 += Form2.InterPoints[i].size();
+		vector<float> ratios;
+		for (int j=0;j<Form2.InterPoints[i].size();j++) {
+			int h = 0;
+			if (i%2) {
+				h = Form2.InterPoints[i][j].x - Form2.FormPoints[0].x;
+			} else {
+				h = Form2.InterPoints[i][j].y - Form2.FormPoints[0].y;
+			}
+			ratios.push_back((float)h/lenght2[i]);
+		}
+		ratios2.push_back(ratios);
+	}
+
+	for (int i=0;i<4;i++) {
+		for (int r1=0;r1<ratios1[i].size();r1++) {
+			for (int r2=0;r2<ratios2[i].size();r2++) {
+				if(abs(ratios1[i][r1] - ratios2[i][r2])<0.055) {
+					MatchNums++;
+					MatchNum[i]++;
+					break;
+				}
+			}
+		}
+	}
+
+	/// 如果边界点全无则输出匹配为0
+	if (interP1+interP2<1) {
+		return 0;
+	}	
+
+	//内部线的交点匹配
+	vector<vector<float>> libratios;
+	vector<vector<float>> tempratios;
+
+	int diffh = 0;
+	int diffw = 0;
+	interP1 = Form1.InterPoints[4].size();
+	interP2 = Form2.InterPoints[4].size();
+	int MatchNums2 =0;
+	
+	for (int j=0;j<interP1;j++) {
+		vector<float> ratios;
+		diffw = Form1.InterPoints[4][j].x - Form1.FormPoints[0].x;
+		diffh = Form1.InterPoints[4][j].y - Form1.FormPoints[0].y;
+		ratios.push_back((float)diffw/width1);
+		ratios.push_back((float)diffh/height1);
+		libratios.push_back(ratios);
+	}
+		
+	for (int j=0;j<interP2;j++) {
+		vector<float> ratios;
+		diffw = Form2.InterPoints[4][j].x - Form2.FormPoints[0].x;
+		diffh = Form2.InterPoints[4][j].y - Form2.FormPoints[0].y;
+		ratios.push_back((float)diffw/width2);
+		ratios.push_back((float)diffh/height2);
+		tempratios.push_back(ratios);
+	}
+
+	for (int r1=0;r1<tempratios.size();r1++) {
+		for (int r2=0;r2<libratios.size();r2++) {
+			if(abs(tempratios[r1][0] - libratios[r2][0])< 0.055 && abs(tempratios[r1][1] - libratios[r2][1]) < 0.055) {
+				MatchNums2++;
+				break;
+			}
+		}
+	}
+
+	float cof1 =(float)2*MatchNums*100/(interP1+interP2);
+	float cof2 =(float)2*MatchNums2*100/(interP1+interP2);
+	float cof = cof1*0.4 + cof2*0.6;
+	return cof1*0.4 + cof2*0.6;
+}
+
+
+/// 根据Form特征进行模板匹配
+int icvAutoClassifyBasedForm(Mat& binImg, const vector<ImageTemplate> vecIT, ReferPtInfo& refPtInfo, vector<int>& vecIndex) {
+	vector<vector<float>> barcodelines;
+	vector<FormInfo> CFormInfo;
+	Point2f referPt;
+	float sinA;
+	int nFormMatch = 0;
+	Mat tmpImg = ~binImg;
+	int nRet = icvCalcFormInfo(tmpImg, barcodelines, CFormInfo, referPt, sinA);
+	
+	if (nRet < 0) {
+		return -1;
+	} else {
+		binImg = ~tmpImg;
+
+		refPtInfo.isForm = true;
+		refPtInfo.formPt = CFormInfo[0].FormPoints[0];
+		refPtInfo.formHeight = (CFormInfo[0].FormPoints[2].y - CFormInfo[0].FormPoints[0].y + CFormInfo[0].FormPoints[3].y - CFormInfo[0].FormPoints[1].y) * 0.5;
+		refPtInfo.formWidth  = (CFormInfo[0].FormPoints[1].x - CFormInfo[0].FormPoints[0].x);
+		vector<int>vecScore;
+		for (int idx = 0; idx < vecIndex.size(); idx++) {
+			int nCurMatch = 0;
+			int maxMatchScore = 0;
+			if (vecIndex[idx] < 0 || vecIndex[idx] >= vecIT.size()) {
+				vecIndex[idx] = - 1;
+				continue;
+			}
+
+			/// <待分类图像的Form特征>
+			for (int m = 0; m < CFormInfo.size(); m++) {
+				/// <模板的Form特征>
+				for (int n = 0; n < vecIT[vecIndex[idx]].tForms.size(); n++) {
+					/// <角点特征差异过大不进行匹配>
+					if (abs(vecIT[vecIndex[idx]].tForms[m].FormPoints[0].x - CFormInfo[m].FormPoints[0].x) > 450) {
+						continue;
+					}
+					float fHratio = 1.0f, fWratio = 1.0f;
+					int nFormMatchScore = outLineMatch(vecIT[vecIndex[idx]].tForms[m], CFormInfo[m], fWratio, fHratio);
+					if (nFormMatchScore > 75) {		//82
+						nCurMatch++;
+						maxMatchScore = max(maxMatchScore, nFormMatchScore);
+						break;
+					}
+				}
+			}
+
+			if (!nCurMatch) {
+				vecIndex[idx] = - 1;
+			} else {
+				nFormMatch++;
+				vecScore.push_back(maxMatchScore);
+			}
+		}
+		vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());
+		sortIndexByScore(vecIndex, vecScore);
+	}
+
+	return nFormMatch;
+}

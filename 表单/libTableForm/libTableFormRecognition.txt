@@ -1,0 +1,1810 @@
+/***************************************************************************************************
+
+ **************************************************************************************************/
+
+#include "stdafx.h"
+#include "libTableFormRecognition.h"
+#include "libReadImageByFreeImage.h"
+#include "LineSegAndRecog_form.h"
+#include "FinanStateQuality.h"
+#include "libRecogText.h"
+#include "libLocText.h"
+#include "libThresh.h"
+#include "libSeal.h"
+#include "libSkew.h"
+#include "tpCon.h"
+
+//#define ICV_TIME_ENCIPHER		/// 时间戳加密开关
+#ifdef ICV_TIME_ENCIPHER
+#include "ValidationCheck.h"
+#endif
+
+//#define ENCRYPT_LIC   ///license加密开关
+#ifdef ENCRYPT_LIC
+#include "libMPLicVerify.h"
+#ifdef _WIN64
+#ifdef _DEBUG
+#pragma comment(lib, "cryptlib_MD_x64d.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x64d.lib")
+#else
+#pragma comment(lib, "cryptlib_MD_x64.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x64.lib")
+#endif
+#else
+#ifdef _DEBUG
+#pragma comment(lib, "cryptlib_MD_x86d.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x86d.lib")
+#else
+#pragma comment(lib, "cryptlib_MD_x86.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x86.lib")
+#endif
+#endif
+#endif
+
+#define ICV_TBB					/// TBB 开关
+#ifdef ICV_TBB
+#include "tbb/blocked_range2d.h"
+#include "tbb/blocked_range.h"
+#include "tbb/parallel_for.h"
+#include "tbb/tick_count.h"
+#include "tbb/task_scheduler_init.h"
+#include "tbb/task.h"
+#endif
+
+//#define ICV_XML				/// 校验公式开关
+#ifdef ICV_XML
+#include "tinyxml.h"
+#pragma comment(lib, "tinyxml.lib")
+#endif
+
+/// <==========================================================================================> ///
+
+//typedef struct _tagTableFormEngine{
+//	/// 1 pntr识别引擎
+//	long lOcrHandle;
+//
+//	/// 2 图像质量评判
+//	int  bUseQuality;
+//	long lQulityHandle;
+//
+//	/// 3 文字方向调整
+//	int  bUseTextDirAdjust;
+//
+//	/// 4 文字校对(针对报表采用固定字典进行校对)
+//	int  bUseTextDic;
+//	vector<string> vStrDic;
+//
+//	/// 引擎初始化
+//	_tagTableFormEngine(){
+//		this->lOcrHandle = 0;
+//		this->bUseQuality = 0;
+//		this->lQulityHandle = 0;
+//		this->bUseTextDirAdjust = 0;
+//		this->bUseTextDic = 0;
+//		this->vStrDic = vector<string>(0);
+//	}
+//}iTableFormEngine;
+
+/// <==========================================================================================> ///
+//string iBasic_GetDllPath(string strDllName){
+//	TCHAR modulePath[MAX_PATH];
+//
+//	tstring tstrDllName = classToWStr(strDllName);
+//	HMODULE hHandle= GetModuleHandle(tstrDllName.c_str());
+//
+//	GetModuleFileName(hHandle, modulePath, MAX_PATH);
+//	tstring strPath(modulePath);
+//
+//	int backslashIndex = strPath.find_last_of('\\');
+//	strPath = strPath.substr(0,backslashIndex);
+//
+//	return classToStr(strPath);
+//}
+
+int nGlobalThread = 1;
+void fIvTableFormRecog_SingleHandle_UnInit(long& handle);
+long fIvTableFormRecog_SingleHandle_Init(string modelPath);
+
+vector<string> LoadTextDic(string dicPath){
+	vector<string> vecStrDic;
+
+	ifstream in_fs;
+	in_fs.open(dicPath.c_str(), ios::in);
+	if (!in_fs) {
+		in_fs.close();
+		return vecStrDic;
+	}
+		
+	while (!in_fs.eof()) {
+		string line;
+		getline(in_fs, line);
+#ifndef _MSC_VER
+		string tmp = boost::locale::conv::to_utf<char>(line,"GBK");
+		line = tmp;
+#endif
+		//多载入换行符
+		if(line.rfind("\r") != string::npos) {
+			int idx = line.rfind("\r");
+			line.erase(idx,1);
+		}
+		
+		vecStrDic.push_back(line);
+	}
+
+	in_fs.close();
+	return vecStrDic;
+}
+
+void icvLoadConfigTxt(string strConfigFile, iRecogText::iTableFormEngine* engine) {
+	ifstream inFid;
+	inFid.open(strConfigFile, ios::in);
+	if (inFid) {
+		while (!inFid.eof()) {
+			string line;
+			getline(inFid, line);
+
+			if (line.find("[是否使用文字校对]") != string::npos){
+				line = "";
+				getline(inFid, line);
+				if (line.find("是") != string::npos && engine->bUseTextDic)	{
+					engine->bUseTextDic = true;
+				}
+				else{
+					engine->bUseTextDic = false;
+				}
+			}
+			else if (line.find("[是否使用图像质量评判]") != string::npos){
+				line = "";
+				getline(inFid, line);
+				if (line.find("是") != string::npos && engine->bUseQuality)	{
+					engine->bUseQuality = true;
+				}
+				else{
+					engine->bUseQuality = false;
+				}
+			}
+			else if (line.find("[是否进行角度纠正]") != string::npos) {
+				line = "";
+				getline(inFid, line);
+				if (line.find("是") != string::npos){
+					engine->bUseTextDirAdjust = true;
+				}
+				else{
+					engine->bUseTextDirAdjust = false;
+				}
+			}
+		}
+	} else {
+		LOG(ERROR) << "Not find " << strConfigFile;
+	}
+	inFid.close();
+}
+
+long fIvTableFormRecog_SingleHandle_Init(string modelPath) {
+	if (modelPath.size() == 0) {
+		modelPath = "./model/";
+	}
+	if (modelPath[modelPath.size() - 1] != '/' && modelPath[modelPath.size() - 1] != '\\') {
+		modelPath = modelPath + "/";
+	}
+
+#ifdef ICV_TIME_ENCIPHER
+	int nValid = ValidationCheck(modelPath + "ImageQE.ac");
+	if (nValid < 0)
+	{
+		cout<< "解密失败！";
+		return 0;
+	}
+	else {
+		cout<< "解密成功！";
+	}
+#endif
+
+	/// 识别引擎初始化
+	long lOcrHandle = LineSegAndRecog_Init(modelPath);
+	if (lOcrHandle <= 0) {
+		LOG(ERROR) << "模型加载失败，请检查模型路径" << modelPath;
+		return TABLE_RET_ERR_MODEL;
+	}
+
+	iRecogText::iTableFormEngine* engine = new iRecogText::iTableFormEngine;
+	engine->lOcrHandle = lOcrHandle;
+
+	/// 图像质量评判
+	long lQualityHandle = Init(modelPath + "QualityJudge.xml");
+	if (lQualityHandle <= 0){
+		engine->bUseQuality = 0;
+		engine->lQulityHandle = 0;
+	}
+	else{
+		engine->bUseQuality = 1;
+		engine->lQulityHandle = lQualityHandle;
+	}
+
+	/// 文字方向调整
+	engine->bUseTextDirAdjust = 0;
+
+	/// 文字校对
+	engine->bUseTextDic = 0;
+
+	engine->vStrDic = LoadTextDic(modelPath + "table_cell_dic.txt");
+	if (engine->vStrDic.size() == 0){
+		engine->bUseTextDic = 0;
+	}
+	else{
+		engine->bUseTextDic = 1;
+	}
+
+	/// 根据配置文档进行相关处理
+	string config = modelPath + "config.txt";
+	icvLoadConfigTxt(config, engine);
+	return long(engine);
+}
+
+long fIvTableFormRecog_Init(string modelPath){
+	if (modelPath.size() == 0) {
+		modelPath = "./model/";
+	}
+	if (modelPath[modelPath.size() - 1] != '/' && modelPath[modelPath.size() - 1] != '\\') {
+		modelPath = modelPath + "/";
+	}
+#ifdef ENCRYPT_LIC
+	string lic_path = modelPath;
+	lic_path += "/license.lic";
+
+	int ret = InitVerify((char*)lic_path.c_str());
+	if (ret != PASS) {
+		FreeVerify();
+		LOG(INFO) << "授权文件加载失败！";
+		return ret;
+	}
+	char* lic_str = "308204BB020100300D06092A864886F70D0101010500048204A5308204A10201000282010100A7D4FE156849B7DEF9F68811F66C0D261D47EA7CA066F6E301F331FB0C6BB1D140C94F39A355FB540CFE75B4B991E747CF2236426F145C3FE06B507B3288F0DEBB4920153B34ECC1B43D9E19A3B051E0F4C7DF9D0D4573C9A74B0B27D84A7250F73CF5548811052169417FD8E87BC8BE9913D1FEEFD09896ECC2F97E87744DBA08E8C3FEF57765C7F4CDAF2837263F7C8499570BE2F3A3711F5262095FF54D9696057636752E670C80FC88832156141F3027C0A1B1F1217D46BC3EE6D49F5DE621B3ADF68AAFC6169970800BA719F504E50F256374E650BE3E888D27339822310796466F62A525D5E7B3F152D05E3EBF887CB0D4F83E3BF0F5DFC542828E1F3F0201110282010002F634AC0C61AD68D4390E72C3987EB9E5692CCBFCCE9DF4F27B41A28C4428C8F69A24088BEAEDD8D30D869845889929ED112B1F4A3E19B8D84A2D1741A50D49337E4757B741AFD940EC0148BC1CB6269AE86BDA1CD8911A2596681A4D9AE9EC58B143938FF440D7EE47EEADFE144148A2532C5D588FBA691039A709C324B00DCBA89C9476E66BD9F4BDE98B164E42472E959097513D9EE71AF02FB73E7CA04C65DB0F5DAE425330239E9AC1FA55789F7C633D236947A6E3BAB419D45A6A29C325946E872AE489884A696D45FF78E49763D97258DE53FCF84562314D4E8B4D6CC21453D44F96D232B6F33FA8A73D90A8EAB6EA2B436362DCE69927B547D34D1D02818100D818BB3E0A4FAEC09DAE93A241F15B2763E0E076D0B4FC2DA9AFC1534B3345B9C6FF9728EBA6857DA1B99C529595E4AA94CF70E8AD93530B76A7238A876075F3D47E406713511ADAD76804A7EF1C723720ED5B499E85ACF2B9FE33D0A578BA7B07EC91DB19D108D37BE54B54F6B17C768D4CAE5F28C77EDF4280D0F69239566302818100C6D2B5394426821DD515696705378DE8D0F275166BF02570D47810D0EA8136F398887850F6D97791A77CAA95CCD4D17C680B71E2612C32B3D18CB9059F1454155104F64EA372E465F407A08FD5E593F5A9FFCFC34A73FA2C28CE1A39D5F4444DB47F2640001C407341F68EA8D4B6BCE506B2D78CE4CC302BFD782A2B5F8F0C7502818065B1490E22F8523C867045798871944EC5970037E9BE94CA31BC1EBDC90911C0D61DECC7F66C7B0DF1C0C208BEDD205046074431429FAE9BFB99F29B8B003781CD6896C718262AC1564F113FF80D62ECC4337640C311BACC93C2EB3502932A943FF6DB39EE080427495CD827FB9ED128BAF6E8A5405DE15A012D8F8317A283010281802EC82AA410090F8E8C7D82365B9499DC6D6639AAEC388147B985A99A9187D0B1C98985B8B28D858BAEF028233F41223B63C6752634FB57395E7B76D4256E31E6E5E30CC7358471F9DF10DA7C325422D0643C30E2A81B49EC45D62449D7FD3D3F75C39087878E2D484BC18AFA8C673B812EC0AB3035D5B0FB4AB2DCBEE94ED5C102818100A65BA4F1A04FE80A2E9E37DB13AF8145625570B436F9BF1785AEBF9E259302FD117554275874B618705171CABA02B0C5B1406BBCF256EB46F7222313F192C6E3A96EF6E6C4445BE98D1A2477B2BBA3E0F43A7C1B82A97DB3C66C443503CA23F3C3BDA426928DDF3948BC17A8958596ACC6C401F9BA75739108473F2D8062C6B1";	
+	char* lic_id = "129";
+	ret = Verify(lic_str, lic_id);
+	if (ret != PASS) {
+		FreeVerify();
+		LOG(INFO) << "授权文件校验失败！";
+		return ret;
+	}
+
+	FreeVerify();
+#endif
+
+#ifdef ICV_TIME_ENCIPHER
+	int nValid = ValidationCheck(modelPath + "ImageQE.ac");
+	if (nValid < 0)
+	{
+		cout<< "解密失败！";
+		return 0;
+	}
+	else {
+		cout<< "解密成功！";
+	}
+#endif
+
+#ifdef ICV_TBB
+	nGlobalThread = 8;//tbb::task_scheduler_init::default_num_threads();
+#endif
+	
+	long* engine = new long[nGlobalThread];
+	memset(engine, 0, sizeof(long) * nGlobalThread);
+	bool bFalg = true;
+	for (int i = 0; i < nGlobalThread; i++) {
+		long handle = fIvTableFormRecog_SingleHandle_Init(modelPath);
+		if (handle <= 0) {
+			bFalg = false;
+			break;
+		}
+		engine[i] = handle;
+	}
+
+	if (!bFalg)
+	{
+		for (int i = 0; i < nGlobalThread; i++) {
+			fIvTableFormRecog_SingleHandle_UnInit(engine[i]);
+		}
+
+		delete [] engine; engine = NULL;
+		return 0;
+	}
+	
+
+	LOG(INFO) << "模型加载完成.";
+
+	return long(engine);
+}
+
+int  fIvTableFormRecog_SetTextDic(long& handle, string modelPath, bool bUse /* = true */){
+	if (handle <= 0) {
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+
+	long* engineptr = (long*)handle;
+	for (int i = 0; i < nGlobalThread; i++) {
+		iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)engineptr[i];
+
+		/// 设置为否，清空字典并置否
+		if (!bUse) {
+			engine->bUseTextDic = bUse;
+			engine->vStrDic.clear();
+
+		}
+
+		else if (engine->vStrDic.size()){
+			engine->bUseTextDic = bUse;
+		}
+		else {
+			engine->vStrDic = LoadTextDic(modelPath);
+			if (engine->vStrDic.size() == 0){
+				engine->bUseTextDic = 0;
+
+				handle = long(engine);
+				return TABLE_RET_ERR_MODEL;
+			}
+			else{
+				engine->bUseTextDic = 1;
+			}
+		}
+	}
+
+	
+	handle = long(engineptr);
+	return TABLE_RET_OK;
+}
+
+int  fIvTableFormRecog_SetQuality(long& handle, string modelPath, bool bUse /* = true */){
+	if (handle <= 0) {
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+
+	long* engineptr = (long*)handle;
+	for (int i = 0; i < nGlobalThread; i++) {
+		iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)engineptr[i];
+		if (!bUse) {
+			engine->bUseQuality = bUse;
+			Uinit(engine->lQulityHandle);
+			engine->lQulityHandle = 0;
+		}
+		else if (engine->lQulityHandle){
+			engine->bUseQuality = bUse;
+		}
+		else {
+			engine->lQulityHandle = Init(modelPath);
+			if (engine->lQulityHandle) {
+				engine->bUseQuality = bUse;
+			}
+			else{
+				engine->bUseQuality = !bUse;
+				handle = long(engine);
+				return TABLE_RET_ERR_QUALITY;
+			}
+		}
+	}
+
+
+	handle = long(engineptr);
+
+	return TABLE_RET_OK;
+}
+
+int  fIvTableFormRecog_SetTextDir(long& handle, bool bUse /* = true */){
+	if (handle <= 0) {
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	long* engineptr = (long*)handle;
+	for (int i = 0; i < nGlobalThread; i++) {
+		iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)engineptr[i];
+		engine->bUseTextDirAdjust = bUse;
+	}
+
+	handle = long(engineptr);
+	return TABLE_RET_OK;
+}
+
+void fIvTableFormRecog_SingleHandle_UnInit(long& handle){
+	/// <引擎非空>
+	if (handle > 0)	{
+		iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)handle;
+		LineSegAndRecog_UnInit(engine->lOcrHandle);	engine->lOcrHandle = 0;
+		Uinit(engine->lQulityHandle);				engine->lQulityHandle = 0;
+		engine->vStrDic.clear();		
+		delete engine; engine = NULL;
+	}
+	
+	/// <引擎置空>
+	handle = 0;
+}
+
+void fIvTableFormRecog_UnInit(long& handle){
+	/// <引擎非空>
+	if (handle > 0)	{
+		long* engine = (long*)handle;
+		for (int i = 0; i < nGlobalThread; i++) {
+			fIvTableFormRecog_SingleHandle_UnInit(engine[i]);
+		}
+		delete [] engine; engine = NULL;
+	}
+
+	/// <引擎置空>
+	handle = 0;
+
+	LOG(INFO) << "模型释放完成.";
+}
+
+int  fIvTableFormRecog_path(long handle, string imgPath, vector<iTableFormCell>& vTableFormResult, iTableFormType iType) {
+	if (handle <= 0) {
+		LOG(ERROR) << "识别引擎句柄异常.";
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	Mat img/* = imread(imgPath, -1)*/;
+	ImageFile2Mat(imgPath.c_str(), img);
+	if (img.empty()) {
+		LOG(ERROR) << "输入图片路径异常，请核对! " << imgPath;
+		return TABLE_RET_ERR_IMG_PATH;
+	}
+
+	long* singHandle = (long*)handle;
+	iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)singHandle[0];
+	if (engine->bUseQuality) {
+		ImageCheckInfo cResult;
+		string strResult = "";
+		int defectNum = 0;
+		ImageQualityCheck(imgPath, engine->lQulityHandle, cResult, strResult, defectNum);
+		if (defectNum) {
+			LOG(ERROR) << "输入图像质量不合格，请核对！ " << strResult;
+			return TABLE_RET_ERR_QUALITY;
+		}
+	}	
+
+	return fIvTableFormRecog_mat(handle, img, vTableFormResult, iType);
+}
+
+int  fIvTableFormRecog_path(long handle, string imgPath, vector<vector<iTableFormCell>>& arrTableFormResult){
+	if (handle <= 0) {
+		LOG(ERROR) << "识别引擎句柄异常.";
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	Mat img/* = imread(imgPath, -1)*/;
+	ImageFile2Mat(imgPath.c_str(), img);
+	if (img.empty()) {
+		LOG(ERROR) << "输入图片路径异常，请核对! " << imgPath;
+		return TABLE_RET_ERR_IMG_PATH;
+	}
+
+	long* singHandle = (long*)handle;
+	iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)singHandle[0];
+	if (engine->bUseQuality) {
+		ImageCheckInfo cResult;
+		string strResult = "";
+		int defectNum = 0;
+		ImageQualityCheck(imgPath, engine->lQulityHandle, cResult, strResult, defectNum);
+		if (defectNum) {
+			LOG(ERROR) << "输入图像质量不合格，请核对！ " << strResult;
+			return TABLE_RET_ERR_QUALITY;
+		}
+	}	
+
+	return fIvTableFormRecog_mat(handle, img, arrTableFormResult);
+}
+
+int  fIvTableFormRecog_data(long handle, char* data, int nLen, vector<iTableFormCell>& vTableFormResult, iTableFormType iType){
+	if (handle <= 0) {
+		LOG(ERROR) << "识别引擎句柄异常.";
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	Mat img/* = imdecode(data_vec, 1)*/;//数据流转换成mat图像
+	Stream2Mat((char*)data, nLen, img);
+	if (img.empty()) {
+		LOG(ERROR) << "输入图像数据流异常，请核对! ";
+		return TABLE_RET_ERR_IMG_DATA;
+	}
+
+	long* singHandle = (long*)handle;
+	iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)singHandle[0];
+	if (engine->bUseQuality) {
+		ImageCheckInfo cResult;
+		string strResult = "";
+		int defectNum = 0;
+		ImageQualityCheckStream((unsigned char*)data, nLen, engine->lQulityHandle, cResult, strResult, defectNum);
+		if (defectNum) {
+			LOG(ERROR) << "输入图像质量不合格，请核对！ " << strResult;
+			return TABLE_RET_ERR_QUALITY;
+		}
+	}	
+	
+	return fIvTableFormRecog_mat(handle, img, vTableFormResult, iType);
+}
+
+int  fIvTableFormRecog_data(long handle, char* data, int nLen, vector<vector<iTableFormCell>>& arrTableFormResult){
+	if (handle <= 0)
+	{
+		LOG(ERROR) << "识别引擎句柄异常.";
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	Mat img/* = imdecode(data_vec, 1)*/;//数据流转换成mat图像
+	Stream2Mat((char*)data, nLen, img);
+
+	if (img.empty())
+	{
+		LOG(ERROR) << "输入图像数据流异常，请核对! ";
+		return TABLE_RET_ERR_IMG_DATA;
+	}
+
+	//王博添加尺寸大小归一化20180210（尺寸过大的保持长宽比不变，将长缩减为3500）
+	/*if(std::max(img.rows,img.cols)>3500)
+	{
+	if (img.rows>=img.cols)
+	{
+	resize(img,img,Size(img.cols*1.0*3500/img.rows,3500));
+	} 
+	else
+	{
+	resize(img,img,Size(3500,img.rows*1.0*3500/img.cols));
+	}
+
+	}*/
+	//不论大小统一归一化到最长边2500，王博20180419
+	/*if (img.rows>=img.cols)
+	{
+		resize(img,img,Size(img.cols*1.0*2500/img.rows,2500));
+	} 
+	else
+	{
+		resize(img,img,Size(2500,img.rows*1.0*2500/img.cols));
+	}*/
+	long* singHandle = (long*)handle;
+	iRecogText::iTableFormEngine* engine = (iRecogText::iTableFormEngine*)singHandle[0];
+	if (engine->bUseQuality)
+	{
+		ImageCheckInfo cResult;
+		string strResult = "";
+		int defectNum = 0;
+		ImageQualityCheckStream((unsigned char*)data, nLen, engine->lQulityHandle, cResult, strResult, defectNum);
+		if (defectNum)
+		{
+			LOG(ERROR) << "输入图像质量不合格，请核对！ " << strResult;
+			return TABLE_RET_ERR_QUALITY;
+		}
+	}	
+
+	return fIvTableFormRecog_mat(handle, img, arrTableFormResult);
+}
+
+struct tbb_cell_ocr {
+	tbb_cell_ocr(){}
+	tbb_cell_ocr(long handle, Mat gray, Mat bw): handle_(handle), gray_(gray), bw_(bw){}
+
+	void operator() (Rect rc, iTableFormCell& cellResult, int iType) const {
+		Mat localBwImg = bw_(rc).clone(), localGrayImg = gray_(rc).clone();
+		
+		 //针对财务报表进行了特殊处理
+		if (iType == iTableFormType::FORM_NORM)	{
+			iLocText::fillEdge(localGrayImg, localBwImg);
+		}
+		//iLocText::grayFillEdge(localGrayImg);//王博修改边界填充方式(20171129王博添加，针对任何单元格都进行边界填充，全文识别)
+		cellResult.lef = rc.x;	cellResult.rig = rc.br().x;
+		cellResult.top = rc.y;	cellResult.bot = rc.br().y;
+
+		iRecogText::lineOCR(handle_, localGrayImg, cellResult);			
+	}
+
+	long handle_;
+	Mat gray_;
+	Mat bw_;	
+};
+
+#ifdef ICV_TBB
+/// 单句柄多线程
+struct parall_tbb_cell_cor{
+	parall_tbb_cell_cor(long handle, Mat gray, Mat bw, vector<Rect> vCellResult, vector<iTableFormCell>& vTableFormResult, int iType):
+		handle_(handle), gray_(gray), bw_(bw), vCellResult_(vCellResult), vTableFormResult_(vTableFormResult), iType_(iType), t(tbb_cell_ocr(handle, gray, bw)){
+		}
+
+	void operator () (tbb::blocked_range<int>& r) const {
+		for (int i = r.begin(); i < r.end(); i++) {
+			t(vCellResult_[i], vTableFormResult_[i], iType_);
+		}	
+	}
+	
+	tbb_cell_ocr t;
+	long handle_;
+	Mat gray_;
+	Mat bw_;
+	vector<Rect> vCellResult_;
+	vector<iTableFormCell>& vTableFormResult_;
+	int iType_;
+};
+
+/// 单句柄多线程
+struct parall_tbb_cell_ocr_2d{
+	parall_tbb_cell_ocr_2d(long handle, Mat gray, Mat bw, vector<vector<Rect>> vCellResult, vector<vector<iTableFormCell>>& vTableFormResult, int iType):
+		handle_(handle), gray_(gray), bw_(bw), vCellResult_(vCellResult), vTableFormResult_(vTableFormResult), iType_(iType), t(tbb_cell_ocr(handle, gray, bw)){;
+	}
+
+	void operator () (tbb::blocked_range<int>& r) const {	
+		for (int i = r.begin(); i < r.end();i++) {
+			for (int j = 0; j < vCellResult_[i].size(); j++) {
+				t(vCellResult_[i][j], vTableFormResult_[i][j], iType_);
+			}
+		}
+	}
+
+	tbb_cell_ocr t;
+	long handle_;
+	Mat gray_;
+	Mat bw_;
+	vector<vector<Rect>> vCellResult_;
+	vector<vector<iTableFormCell>>& vTableFormResult_;
+	int iType_;
+};
+
+/// 多句柄多线程
+struct parall_tbb_cell_ocr_2d_multi_handle {
+	parall_tbb_cell_ocr_2d_multi_handle(long handle, Mat gray, Mat bw, vector<Rect> vCellResult, vector<iTableFormCell>& vTableFormResult, int iType) :
+		handle_(handle), gray_(gray), bw_(bw), vCellResult_(vCellResult), vTableFormResult_(vTableFormResult), iType_(iType){			
+			long* engine = (long*)handle_;
+			for (int j = 0; j < nGlobalThread; j++)
+			{
+				t[j].bw_ = bw_.clone();
+				t[j].gray_ = gray_.clone();
+				t[j].handle_ = engine[j];
+			}
+		}
+
+	void operator() (tbb::blocked_range<int>& r) const {
+		for (int i = r.begin(); i < r.end();i++) {				
+			t[i](vCellResult_[i], vTableFormResult_[i], iType_);
+		}
+	}
+	tbb_cell_ocr t[20];
+	long handle_;
+	Mat gray_;
+	Mat bw_;
+	vector<Rect> vCellResult_;
+	vector<iTableFormCell>& vTableFormResult_;
+	int iType_;	
+};
+
+#endif
+
+void tableFormRecog_cell(long handle, Mat gray, Mat bw, vector<Rect> vCellRect, vector<iTableFormCell>& vTableFormResult, int iType){	
+	vTableFormResult.clear();
+
+	/// 异常判断
+	if (handle <= 0 || gray.empty() || bw.empty() || vCellRect.size() == 0)	{		
+		return;
+	}
+
+	vTableFormResult.resize(vCellRect.size());
+#ifdef ICV_TBB
+	tbb::parallel_for(tbb::blocked_range<int>(0, vCellRect.size()), parall_tbb_cell_cor(handle, gray, bw, vCellRect, vTableFormResult, iType));
+#else
+	tbb_cell_ocr t = tbb_cell_ocr(handle, gray, bw);
+	for (int i = 0; i < vCellRect.size();i++) {
+		t(vCellRect[i], vTableFormResult[i], iType);
+	}
+
+#endif
+}
+
+
+void tableFormRecog_arrCell(long handle, Mat gray, Mat bw, vector<Rect> vCellRect, vector<vector<iTableFormCell>>& arrTableFormResult, int iType){	
+	arrTableFormResult.clear();
+
+	if (handle <= 0 || gray.empty() || bw.empty() || vCellRect.size() == 0)	{		
+		return;
+	}
+
+	vector<vector<Rect>> arrRect;	
+	iLocText::sortRectAsArray(vCellRect, arrRect);
+	
+	arrTableFormResult.resize(arrRect.size());
+	for (int i = 0; i < arrRect.size(); i++) {
+		arrTableFormResult[i].resize(arrRect[i].size());
+	}
+
+#ifdef ICV_TBB
+	tbb::parallel_for(tbb::blocked_range<int>(0, arrRect.size()), parall_tbb_cell_ocr_2d(handle, gray, bw, arrRect, arrTableFormResult, iType));
+#else
+	tbb_cell_ocr t = tbb_cell_ocr(handle, gray, bw);
+	for (int i = 0; i < arrRect.size();i++) {
+		for (int j = 0; j < arrRect[i].size(); j++) {
+			t(arrRect[i][j], arrTableFormResult[i][j], iType);
+		}		
+	}
+#endif
+}
+
+bool sortTableFormRectAscendY(iTableFormCell a, iTableFormCell b) {
+	return a.top < b.top;
+}
+
+bool sortTableFormRectAscendX(iTableFormCell a, iTableFormCell b) {
+	return a.lef < b.lef;
+}
+
+bool CheckIfTableSameRow(iTableFormCell a, iTableFormCell b)
+{
+	int nHeight = std::min(a.bot - a.top, b.bot - b.top);
+	int nOverLap = std::min(a.bot, b.bot) - std::max(a.top, b.top);
+
+	if (nOverLap > nHeight * 0.6)
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+// 通过与已有的方框位置进行对比来判定b是否属于vecArray所在行。这种方式可以在一定程度上降低倾斜产生的影响。
+bool CheckIfTableSameRow(vector<iTableFormCell> vecArray, iTableFormCell b)
+{
+	int nThres = (vecArray[0].rig - vecArray[0].lef) / 2;
+	// find the nearest col
+	bool bFlag = false;
+	int nIndex = -1;
+	for (int i = 0; i < vecArray.size();i++)
+	{
+		if (abs(vecArray[i].lef - b.lef) < nThres)
+		{
+			bFlag = true;
+			nIndex = i;
+		}
+	}
+
+	if (bFlag)
+	{
+		return CheckIfTableSameRow(vecArray[nIndex], b);
+	}
+	else
+	{
+		return CheckIfTableSameRow(vecArray[vecArray.size() - 1], b);
+	}
+}
+
+void sortTableFormRectAsArray(vector<iTableFormCell> vecRects, vector<vector<iTableFormCell> > &vecRectArray)
+{
+	// row sort
+	sort(vecRects.begin(), vecRects.end(), sortTableFormRectAscendY);
+
+	vector<iTableFormCell> vecTmpRects;
+	// select for every row.
+	for (int i = 0; i < vecRects.size(); )
+	{
+		vecTmpRects.clear();
+
+		vecTmpRects.push_back(vecRects[i]);
+
+		int j = i + 1;
+		while (j < vecRects.size())
+		{			
+			if (CheckIfTableSameRow(vecTmpRects, vecRects[j]))
+			{
+				vecTmpRects.push_back(vecRects[j]);
+				j++;
+			}
+			else
+			{
+				i = j;
+				break;
+			}
+		}
+
+		if (j == vecRects.size())
+		{
+			i = j;
+		}
+
+		sort(vecTmpRects.begin(), vecTmpRects.end(), sortTableFormRectAscendX);
+
+		vecRectArray.push_back(vecTmpRects);
+	}
+}
+
+void tableFormRecog_arrCell_multi_handle(long handle, Mat gray, Mat bw, vector<Rect> vCellRect, vector<vector<iTableFormCell>>& arrTableFormResult, int iType){	
+	arrTableFormResult.clear();
+
+	if (handle <= 0 || gray.empty() || bw.empty() || vCellRect.size() == 0)	{		
+		return;
+	}
+
+	vector<vector<Rect>> arrRect;
+	vector<vector<iTableFormCell>> arrRefResult;
+	int i = 0;
+
+	if (vCellRect.size()>=nGlobalThread)
+	{
+		for (; i < vCellRect.size() - nGlobalThread; i += nGlobalThread) {
+			vector<Rect> vRefRect;
+			for (int j = i; j < i + nGlobalThread; j++) {
+				vRefRect.push_back(vCellRect[j]);
+			}
+			arrRect.push_back(vRefRect);
+
+		}
+	}
+	
+	if (i < vCellRect.size()) {
+		vector<Rect> vRefRect;
+		for (int j = i; j < vCellRect.size(); j++) {
+			vRefRect.push_back(vCellRect[j]);
+		}
+		arrRect.push_back(vRefRect);
+	}
+	
+	arrRefResult.resize(arrRect.size());
+	for (i = 0; i < arrRect.size(); i++) {
+		arrRefResult[i].resize(arrRect[i].size());
+	}
+	
+#ifdef ICV_TBB 
+	for (i = 0; i < arrRect.size(); i++)
+	{
+		tbb::parallel_for(tbb::blocked_range<int>(0, arrRect[i].size()), parall_tbb_cell_ocr_2d_multi_handle(handle, gray, bw, arrRect[i], arrRefResult[i], iType));
+	}
+#else 
+	long* engine = (long*)handle;
+	tbb_cell_ocr t = tbb_cell_ocr(engine[0], gray, bw);
+	for (int i = 0; i < arrRect.size();i++) {
+		for (int j = 0; j < arrRect[i].size(); j++) {
+			t(arrRect[i][j], arrRefResult[i][j], iType);
+		}		
+	}
+
+#endif
+	vector<iTableFormCell> vTableFormResult;
+	for (int i = 0; i < arrRefResult.size(); i++) {
+		vTableFormResult.insert(vTableFormResult.end(), arrRefResult[i].begin(), arrRefResult[i].end());
+	}
+
+	sortTableFormRectAsArray(vTableFormResult, arrTableFormResult);
+}
+
+int  fIvTableFormRecog_mat(long handle, Mat img, vector<iTableFormCell>& vTableFormResult, iTableFormType iType){	
+	/// 识别句柄异常判断
+	if (handle <= 0) {
+		LOG(ERROR) << "识别引擎句柄异常.";
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	/// 输入图像异常判断
+	if (img.empty()) {
+		return TABLE_RET_ERR_IMG_MAT;
+	}
+
+	Mat gray, bw;
+
+	/// 1 印章去除
+	iSeal::filter_im_get_gray(img, gray);	
+	double dThres = threshold(gray, bw, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+	threshold(gray, bw, std::max(60.0, dThres - 30), 255, CV_THRESH_BINARY_INV);
+	adaptiveThreshold(gray, bw, 255, ADAPTIVE_THRESH_GAUSSIAN_C, CV_THRESH_BINARY_INV, 11, 0);
+	iLocText::fillEdge(bw);
+
+	/// 2 倾斜矫正，这里采用的是投影的方法
+	{
+		Mat rotationMat = iSkew::angel_modify(bw);
+		warpAffine(gray.clone(), gray, rotationMat, gray.size(), INTER_NEAREST, BORDER_CONSTANT, Scalar(255,255,255,255));
+	}
+
+	/// 3 根据表单类型进行文字定位
+	vector<Rect> vCellRect;	
+	iLocText::locTextRect(gray, bw, vCellRect, iType);
+
+	/// 4 文字方向矫正，判断是否需要进行垂直翻转
+	iRecogText::checkTextDir(handle, gray, bw, vCellRect);
+			
+	/// 5 已定位文字识别,识别按照vector进行输出
+	tableFormRecog_cell(handle, gray, bw, vCellRect, vTableFormResult, iType);
+	
+#ifdef _WRITE_LOC_TABLE_
+	/// 6 show
+	Mat refShow = gray.clone();	cvtColor(refShow, refShow, COLOR_GRAY2BGR);
+	for (int i = 0; i < vCellRect.size(); i++)
+	{
+		rectangle(refShow, vCellRect[i], Scalar(0,0,255), 3);
+	}
+
+	resize(refShow, refShow, Size(refShow.cols / 2, refShow.rows / 2));
+	imshow("", refShow);
+	waitKey(10);
+#endif
+	return TABLE_RET_OK;
+}
+
+int  fIvTableFormRecog_mat(long handle, Mat img, vector<vector<iTableFormCell>>& arrTableFormResult){
+	/// 识别句柄异常判断
+	if (handle <= 0) {
+		LOG(ERROR) << "识别引擎句柄异常.";
+		return TABLE_RET_ERR_HANDLE;
+	}
+
+	/// 输入图像异常判断
+	if (img.empty()) {
+		return TABLE_RET_ERR_IMG_MAT;
+	}
+
+	Mat gray, bw;
+
+	/// 1 印章去除
+	iSeal::filter_im_get_gray(img, gray);
+
+	double dThres = threshold(gray, bw, 0, 255, CV_THRESH_BINARY_INV | CV_THRESH_OTSU);
+	threshold(gray, bw, std::max(60.0, dThres - 30), 255, CV_THRESH_BINARY_INV);
+	iLocText::fillEdge(bw);
+	//iThresh::Binarization_Sauvola(gray, bw, 9, 9, 0.1, 128);
+	//bw = 255 - bw;
+
+	/// 2 倾斜矫正，这里采用的是投影的方法
+	{
+		Mat rotationMat = iSkew::angel_modify(bw);
+		warpAffine(gray.clone(), gray, rotationMat, gray.size(), INTER_NEAREST, BORDER_CONSTANT, Scalar(255,255,255,255));
+	}
+
+	/// 3 根据表单类型进行文字定位
+	vector<Rect> vCellRect;	
+	iLocText::locTextRect(gray, bw, vCellRect, iTableFormType::FORM_NORM);//王博为全文识别改变表格定位类型为unknow20171123,标准表格为form_norm
+
+	/// 4 文字方向矫正，判断是否需要进行垂直翻转
+	{
+		long *engine = (long*)handle;
+		iRecogText::checkTextDir(engine[0], gray, bw, vCellRect);
+	}
+
+	/// 5 已定位文字识别, 将识别结果按照Array形式排列
+	tableFormRecog_arrCell_multi_handle(handle, gray, bw, vCellRect, arrTableFormResult, iTableFormType::FORM_NORM);//王博为全文识别改变表格定位类型为unknow20171123,标准表格为form_norm
+	//tableFormRecog_arrCell(handle, gray, bw, vCellRect, arrTableFormResult, iTableFormType::FORM_NORM);
+	
+#ifdef _WRITE_LOC_TABLE_
+	/// 6 show
+	Mat refShow = gray.clone();	cvtColor(refShow, refShow, COLOR_GRAY2BGR);
+	for (int i = 0; i < vCellRect.size(); i++)
+	{
+		rectangle(refShow, vCellRect[i], Scalar(0,0,255), 3);
+	}
+
+	resize(refShow, refShow, Size(refShow.cols / 2, refShow.rows / 2));
+	imshow("", refShow);
+	waitKey(10);
+#endif
+	return TABLE_RET_OK;
+}
+
+typedef enum _tageCharType{
+	CHAR_NAN = -1,
+	CHAR_CHN = 0,
+	CHAR_NUM = 1,
+	CHAR_VAL = 2,
+}charType;
+
+charType judgeCharType(string str){
+	if (str.size() == 0) {
+		return CHAR_NAN;
+	}
+
+	string strNum = "0123456789";
+	string strDot = ".";
+
+	int nFindNum = 0;
+	for (int i = 0; i < str.size(); i++) {
+		if (strNum.find(str[i]) != string::npos){
+			nFindNum++;
+		}
+	}
+
+	/// 字符串中数字个数过少则为中文
+	if (nFindNum < str.size() * 0.5) {
+		return CHAR_CHN;
+	}
+
+	/// 数字串中有标点则为金额值，否则为序号
+	if (str.find(strDot) != string::npos) {
+		return CHAR_VAL;
+	}
+	else{
+		return CHAR_NUM;
+	}
+}
+
+charType judgeColType(vector<vector<int>> arrCharType, int colIdx){
+	if (arrCharType.size() == 0) {
+		return CHAR_NAN;
+	}
+	if (colIdx < 0 || colIdx >= arrCharType[0].size()) {
+		return CHAR_NAN;
+	}
+
+	int hist[3];
+	for (int i = 0; i < arrCharType.size(); i++) {
+		if (arrCharType[i][colIdx] >= 0) {
+			hist[arrCharType[i][colIdx]]++;
+		}
+	}
+
+	if (hist[0] > hist[1] && hist[0] > hist[2]) {
+		return CHAR_CHN;
+	}
+	else if (hist[1] > hist[0] && hist[1] > hist[2]) {
+		return CHAR_NUM;
+	}
+	else if (hist[2] > hist[0] && hist[2] > hist[1]){
+		return CHAR_VAL;
+	}
+	else{
+		return CHAR_NAN;
+	}
+}
+/*bool checkIfRowHeader(vector<vector<int>> arrCharType, int rowIdx){
+if (arrCharType.size() == 0) {
+return false;
+}
+int hist[3]={0,0,0};
+for (int j=0;j<arrCharType[rowIdx].size();j++)
+{
+if(arrCharType[rowIdx][j]>=0)
+{
+hist[arrCharType[rowIdx][j]]++;
+}
+}
+if(hist[0]&&(!hist[1])&&(!hist[2]))
+{
+return true;
+}
+else
+{
+return false;
+}
+}*/
+
+typedef struct _tagValMapChn{
+	string tit;
+	int idx;
+	int row;
+	int col;
+	float val;
+}stValMapChn;
+
+int matchStr(vector<stValMapChn> vValMapChn, string str){
+	if (vValMapChn.size() == 0) {
+		return -1;
+	}
+
+	if (str.size() == 0) {
+		return -1;
+	}
+
+	int  nLabel = -1;
+	for (int i = 0; i < vValMapChn.size(); i++) {
+		if (!strcmp(str.c_str(), vValMapChn[i].tit.c_str())) {			
+			nLabel = i;
+			break;
+		}
+	}
+
+	return nLabel;
+}
+
+typedef enum{
+	FIV_CHK_OK = 0,
+	FIV_CHK_ERR_NO_MATCH = -1,
+	FIV_CHK_ERR_PARA = -2,
+}FIV_RET;
+
+FIV_RET fIvTableFormRecog_check(vector<stValMapChn> vValMapChn, vector<string> vStrDic, vector<int> vIntMul){
+	if (vStrDic.size() != vIntMul.size() || vStrDic.size() == 0 || vIntMul.size() == 0) {
+		return FIV_CHK_ERR_PARA;
+	}
+	if (vIntMul[0] < 0)	{
+		return FIV_CHK_ERR_PARA;
+	}
+
+	bool bChk = true;
+	for (int i = 0; i < vIntMul.size(); i++) {
+		if (abs(vIntMul[i]) != 1) {
+			bChk = false;
+			break;
+		}
+	}
+	if (bChk == false) {
+		return FIV_CHK_ERR_PARA;
+	}
+
+	vector<int> vLabel;
+	bool bAllMatch = true;
+	for (int i = 0; i < vStrDic.size(); i++) {
+		int nRet = matchStr(vValMapChn, vStrDic[i]);
+		if (nRet < 0) {
+			bAllMatch = false;
+			break;
+		}
+		vLabel.push_back(nRet);
+	}
+
+	if (!bAllMatch) {
+		return FIV_CHK_ERR_NO_MATCH;
+	}
+
+	float fLeft = vValMapChn[vLabel[0]].val * vIntMul[0];
+	float fRigh = 0.f;
+	for (int i = 1; i < vIntMul.size(); i++) {
+		fRigh += vValMapChn[vLabel[i]].val * vIntMul[i];
+	}
+	if (fLeft == fRigh)	{
+		return FIV_CHK_OK;
+	}
+	else{
+		return FIV_CHK_ERR_NO_MATCH;
+	}
+}
+
+
+bool chkXml(string xmlPath, vector<vector<string>>& arrStrDic, vector<vector<int>> & arrIntMul){
+#ifdef ICV_XML
+	TiXmlDocument myDocument(xmlPath.c_str());
+	bool bSucess = myDocument.LoadFile();
+	if (!bSucess) {
+		LOG(ERROR) << "Open Input Model Form XML File Failed!";
+		return false;
+	}
+
+	TiXmlElement* modelElement = myDocument.RootElement();  //Model
+	if (!modelElement) {
+		return false;
+	}
+
+	/// 资产负债表公式解析
+	TiXmlElement* fieldsElement = modelElement->FirstChildElement("financialState"); //financialState
+	if (!fieldsElement) {
+		return false;
+	}
+	TiXmlElement* field = fieldsElement->FirstChildElement(); 
+	if (field == NULL){
+		return false;
+	}
+
+	while (NULL != field){		
+		vector<string> vStrDic;
+		vector<int> vIntMul;
+
+		TiXmlElement* f = field->FirstChildElement();	
+		if (NULL == f) {
+			break;
+		}
+
+		/// 读取公式
+		while (NULL != f) {
+			/// string
+			const char *pValue = f->GetText();
+			vStrDic.push_back(string(pValue));
+			f = f->NextSiblingElement();
+
+			/// factor
+			pValue = f->GetText();
+			vIntMul.push_back(atoi(pValue));
+			f = f->NextSiblingElement();
+		}
+
+		arrStrDic.push_back(vStrDic);
+		arrIntMul.push_back(vIntMul);
+		field = field->NextSiblingElement();
+	}
+
+	/// 利润表公式解析
+	fieldsElement = modelElement->FirstChildElement("profitState");
+	if (!fieldsElement) {
+		return false;
+	}
+	field = fieldsElement->FirstChildElement();
+	if (field == NULL){
+		return false;
+	}
+	while (NULL != field){
+		vector<string> vStrDic;
+		vector<int> vIntMul;
+
+		TiXmlElement* f = field->FirstChildElement();
+		if (NULL == f) {
+			break;
+		}
+
+		/// 读取公式
+		while (NULL != f){
+			/// string
+			const char *pValue = f->GetText();
+			vStrDic.push_back(string(pValue));
+			f = f->NextSiblingElement();
+
+			/// factor
+			pValue = f->GetText();
+			vIntMul.push_back(atoi(pValue));
+			f = f->NextSiblingElement();
+		}
+
+		arrStrDic.push_back(vStrDic);
+		arrIntMul.push_back(vIntMul);
+		field = field->NextSiblingElement();
+	}
+
+	/// 现金流量表
+	fieldsElement = modelElement->FirstChildElement("cashFlow");
+	if (!fieldsElement) {
+		return false;
+	}
+	field = fieldsElement->FirstChildElement();
+	if (field == NULL){
+		return false;
+	}
+	while (NULL != field){
+		vector<string> vStrDic;
+		vector<int> vIntMul;
+
+		TiXmlElement* f = field->FirstChildElement();
+		if (NULL == f) {
+			break;
+		}
+
+		/// 读取公式
+		while (NULL != f){
+			/// string
+			const char *pValue = f->GetText();
+			vStrDic.push_back(string(pValue));
+			f = f->NextSiblingElement();
+
+			/// factor
+			pValue = f->GetText();
+			vIntMul.push_back(atoi(pValue));
+			f = f->NextSiblingElement();
+		}
+		arrStrDic.push_back(vStrDic);
+		arrIntMul.push_back(vIntMul);
+		field = field->NextSiblingElement();
+	}
+	return true;
+#else
+	return false;
+#endif
+}
+
+/// 利用财务公式进行后处理
+void fIvTableFormRecog_postProcess(vector<vector<iTableFormCell>>& arrTableFormResult){
+	if (arrTableFormResult.size() <= 10) {
+		return;
+	}
+
+	vector<int> vIntColNum;
+	vIntColNum.resize(arrTableFormResult.size());
+
+	for (int i = 0; i < arrTableFormResult.size(); i++) {
+		vIntColNum[i] = arrTableFormResult[i].size();
+	}
+
+	bool bFlag = false;
+	for (int i = 0; i < vIntColNum.size() - 1; i++) {
+		if (vIntColNum[i] != vIntColNum[i + 1]) {
+			bFlag = true;
+			break;
+		}
+	}
+
+	/// 每一行的列数不一
+	if (bFlag) {
+		return;
+	}
+
+	/// 判断表单中各列的类型，中文-序号-金额
+	vector<vector<int>> arrCharType;
+	arrCharType.resize(arrTableFormResult.size());
+	for (int i = 0; i < arrTableFormResult.size(); i++) {
+		arrCharType[i].resize(arrTableFormResult[i].size());
+		for (int j = 0; j < arrTableFormResult[i].size(); j++) {
+			arrCharType[i][j] = judgeCharType(arrTableFormResult[i][j].str);
+		}
+	}
+
+	vector<int> vColType;
+	vColType.resize(arrCharType[0].size());
+	for (int i = 0; i < vColType.size(); i++) {
+		vColType[i] = judgeColType(arrCharType, i);
+	}
+
+	/// 生成对应关系映射图
+	vector<stValMapChn> vValMapChn;
+	int label = 0;
+	int title;
+	for (int col = 0; col < vColType.size(); col++) {
+		if (vColType[col] == CHAR_CHN) {
+			title = col;
+		}
+		if (vColType[col] != CHAR_VAL) {
+			continue;
+		}
+		label++;
+
+		for (int row = 0; row < arrTableFormResult.size(); row++) {
+			if (arrCharType[row][col] != CHAR_VAL && arrCharType[row][col] != CHAR_NAN) {
+				continue;
+			}
+			else {
+				stValMapChn tmpVMC;
+				tmpVMC.col = col;
+				tmpVMC.row = row;
+				tmpVMC.idx = label;
+				tmpVMC.tit = arrTableFormResult[row][title].str;
+				tmpVMC.val = atof(arrTableFormResult[row][col].str.c_str());
+				vValMapChn.push_back(tmpVMC);
+			}
+		}
+	}
+
+	/// 根据财务信息+对应关系映射图进行后处理
+	vector<vector<string>> arrStrDic;
+	vector<vector<int>> arrIntMul;
+	chkXml("../财务公式.xml", arrStrDic, arrIntMul);
+
+	if (arrIntMul.size() != arrStrDic.size() || arrIntMul.size() == 0) {
+		return;
+	}
+
+	for (int i = 0; i < arrIntMul.size(); i++)	{
+		FIV_RET fivRet = fIvTableFormRecog_check(vValMapChn, arrStrDic[i], arrIntMul[i]);
+		if (fivRet == FIV_CHK_OK)		{
+			LOG(INFO) << "Matched!";
+		}
+		else{
+			LOG(ERROR) << "NoMatched!";
+		}
+	}
+
+	///// <--------------------------------------------------1 资产负债表-------------------------------------------------->
+	//{	
+	//	/// 公式 1
+	//	/// (存货)=(原材料)+(在产品)+(库存商品)+(周转材料)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("存货");
+	//	vStrDic.push_back("原材料");
+	//	vStrDic.push_back("在产品");
+	//	vStrDic.push_back("库存商品");
+	//	vStrDic.push_back("周转材料");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 2
+	//	/// (流动资产合计)=(货币资金)+(短期投资)+(应收票据)+(应收账款)+(预付账款)+(应收股利)+(应收利息)+(其他应收款)+(存货)+(其他流动资产)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("流动资产合计");					
+	//	vStrDic.push_back("货币资金");					
+	//	vStrDic.push_back("短期投资");					
+	//	vStrDic.push_back("应收票据");					
+	//	vStrDic.push_back("应收账款");					
+	//	vStrDic.push_back("预付账款");					
+	//	vStrDic.push_back("应收股利");					
+	//	vStrDic.push_back("应收利息");					
+	//	vStrDic.push_back("其他应收款");					
+	//	vStrDic.push_back("存货");						
+	//	vStrDic.push_back("其他流动资产");				
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 3
+	//	/// (固定资产账面价值)=(固定资产)-(累计折旧)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("固定资产账面价值");
+	//	vStrDic.push_back("固定资产");
+	//	vStrDic.push_back("累计折旧");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 4
+	//	/// (非流动资产)=(长期债券投资)+(长期股权投资)+(固定资产账面价值)+(在建工程)+(工程物资)+(固定资产清理)+(生产性生物资产)+(无形资产)+(开发支出)+(长期待摊费用)+(其他非流动资产)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("非流动资产");
+	//	vStrDic.push_back("长期债券投资");
+	//	vStrDic.push_back("长期股权投资");
+	//	vStrDic.push_back("固定资产账面价值");
+	//	vStrDic.push_back("在建工程");
+	//	vStrDic.push_back("工程物资");
+	//	vStrDic.push_back("固定资产清理");
+	//	vStrDic.push_back("生产性生物资产");
+	//	vStrDic.push_back("无形资产");
+	//	vStrDic.push_back("开发支出");
+	//	vStrDic.push_back("长期待摊费用");
+	//	vStrDic.push_back("其他非流动资产");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{	
+	//	/// 公式 5
+	//	/// (资产总计)=(流动资产)+(非流动资产)=(固定资产合计)+(流动资产合计)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("资产总计");
+	//	vStrDic.push_back("流动资产");
+	//	vStrDic.push_back("非流动资产");
+	//	vStrDic.push_back("固定资产合计");
+	//	vStrDic.push_back("流动资产合计");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{	
+	//	/// 公式 6
+	//	/// (流动负债合计)=(短期借债)+(应付票据)+(应付账款)+(预收款项)+(应付职工薪酬)+(应交税费)+(应付利息)+(应付利润)+(其他应付款)+(其他流动负债)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("流动负债合计");
+	//	vStrDic.push_back("短期借债");
+	//	vStrDic.push_back("应付票据");
+	//	vStrDic.push_back("应付账款");
+	//	vStrDic.push_back("预收款项");
+	//	vStrDic.push_back("应付职工薪酬");
+	//	vStrDic.push_back("应交税费");
+	//	vStrDic.push_back("应付利息");
+	//	vStrDic.push_back("应付利润");
+	//	vStrDic.push_back("其他应付款");
+	//	vStrDic.push_back("其他流动负债");
+	//	
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{	
+	//	/// 公式 7
+	//	/// (非流动负债合计)=(长期借款)+(长期应付款)+(递延收益)+(其他非流动负债)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("非流动负债合计");
+	//	vStrDic.push_back("长期借款");
+	//	vStrDic.push_back("长期应付款");
+	//	vStrDic.push_back("递延收益");
+	//	vStrDic.push_back("其他非流动负债");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式8
+	//	/// (负债合计)=(流动负债合计)+(非流动负债合计)		
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("负债合计");
+	//	vStrDic.push_back("流动负债合计");
+	//	vStrDic.push_back("非流动负债合计");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 9
+	//	///	(所有者权益(或股东权益)合计)=(实收资本(或股本))+(资本公积)+(盈余公积)+(未分配利润)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("所有者权益(或股东权益)合计");
+	//	vStrDic.push_back("实收资本(或股本)");
+	//	vStrDic.push_back("资本公积");
+	//	vStrDic.push_back("盈余公积");
+	//	vStrDic.push_back("未分配利润");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{	
+	//	/// 公式 10
+	//	///	(负债和所有者权益(或股东权益)总计)=(负债合计)+(所有者权益(或股东权益)合计)
+	//	vector<string> vStrDic;
+	//	//vStrDic.push_back("所有者权益(或股东权益)合计");
+	//	//vStrDic.push_back("负债合计");
+	//	//vStrDic.push_back("所有者权益(或股东权益)合计");
+
+	//	vStrDic.push_back("负债及所有者权益");
+	//	vStrDic.push_back("负债合计");
+	//	vStrDic.push_back("所有者权益合计");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	///// <--------------------------------------------------2 利润表-------------------------------------------------->
+	//{
+	//	/// 公式 1
+	//	/// (营业税金及附加)=(城市建设维护税)+(教育费附加)+(地方教育费附加)+(城镇土地使用税)+(防洪费)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("营业税金及附加");
+	//	vStrDic.push_back("城市建设维护税");
+	//	vStrDic.push_back("教育费附加");
+	//	vStrDic.push_back("地方教育费附加");
+	//	vStrDic.push_back("城镇土地使用税");
+	//	vStrDic.push_back("防洪费");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 2
+	//	/// (营业利润)=(营业收入)-(营业成本)-(营业税金及附加)-(销售费用)-(管理费用)-(财务费用)+(投资收益)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("营业利润");
+	//	vStrDic.push_back("营业收入");
+	//	vStrDic.push_back("营业成本");
+	//	vStrDic.push_back("营业税金及附加");
+	//	vStrDic.push_back("销售费用");
+	//	vStrDic.push_back("管理费用");
+	//	vStrDic.push_back("财务费用");
+	//	vStrDic.push_back("投资收益");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 3
+	//	/// (利润总额)=(营业利润)+(营业外收入)-(营业外支出)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("利润总额");
+	//	vStrDic.push_back("营业利润");
+	//	vStrDic.push_back("营业外收入");
+	//	vStrDic.push_back("营业外支出");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+	//
+	//{
+	//	/// 公式 4
+	//	/// (净利润)=(利润总额)-(所得税费用)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("净利润");
+	//	vStrDic.push_back("利润总额");
+	//	vStrDic.push_back("减：所得税");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	///// <--------------------------------------------------3 现金流量表-------------------------------------------------->
+	//{
+	//	/// 公式 1
+	//	/// (经营活动产生的现金流量净额)=(销售商品、提供劳务收到的现金)+(收到其他与经营活动有关的现金)
+	//	///							-(购买原材料商品、接受劳务支付的现金)-(支付给职工以及为职工支付的现金)-(支付的各项税费)-(支付其他与经营活动有关的现金)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("经营活动产生的现金流量净额");
+	//	vStrDic.push_back("销售商品、提供劳务收到的现金");
+	//	vStrDic.push_back("收到其他与经营活动有关的现金");
+	//	vStrDic.push_back("购买原材料商品、接受劳务支付的现金");
+	//	vStrDic.push_back("支付给职工以及为职工支付的现金");
+	//	vStrDic.push_back("支付的各项税费");
+	//	vStrDic.push_back("支付其他与经营活动有关的现金");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 2
+	//	/// (经营活动产生的现金流量净额)=(收回短期投资、长期债券投资和长期股权投资收到的现金)+(取得投资收益收到的现金)
+	//	///							-(处置固定资产、无形资产和其他长期资产收回的现金净额)-(短期投资、长期债券投资和长期股权投资支付的现金)-(构建固定资产、无形资产和其他非流动资产支付的现金)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("经营活动产生的现金流量净额");
+	//	vStrDic.push_back("收回短期投资、长期债券投资和长期股权投资收到的现金");
+	//	vStrDic.push_back("取得投资收益收到的现金");
+	//	vStrDic.push_back("处置固定资产、无形资产和其他长期资产收回的现金净额");
+	//	vStrDic.push_back("短期投资、长期债券投资和长期股权投资支付的现金");
+	//	vStrDic.push_back("构建固定资产、无形资产和其他非流动资产支付的现金");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 3
+	//	/// (筹资活动产生的现金流量净额)=(吸收投资收到的现金)+(取得借款收到的现金)–(偿还借款本金支付的现金)–(偿还借款利息支付的现金)–(分配利润支付的现金)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("筹资活动产生的现金流量净额");
+	//	vStrDic.push_back("吸收投资收到的现金");
+	//	vStrDic.push_back("取得借款收到的现金");
+	//	vStrDic.push_back("偿还借款本金支付的现金");
+	//	vStrDic.push_back("偿还借款利息支付的现金");
+	//	vStrDic.push_back("分配利润支付的现金");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+	//	vIntMul.push_back(-1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 4
+	//	/// (现金及现金等价物净增加额)=(销售商品、提供劳务收到的现金)+( 经营活动产生的现金流量净额)+( 筹资活动产生的现金流量净额)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("现金及现金等价物净增加额");
+	//	vStrDic.push_back("销售商品、提供劳务收到的现金");
+	//	vStrDic.push_back("经营活动产生的现金流量净额");
+	//	vStrDic.push_back("筹资活动产生的现金流量净额");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+	//{
+	//	/// 公式 5
+	//	/// (期末现金及现金等价物余额)=(现金及现金等价物净增加额)+(加：期初现金及现金等价物余额)
+	//	vector<string> vStrDic;
+	//	vStrDic.push_back("期末现金及现金等价物余额");
+	//	vStrDic.push_back("现金及现金等价物净增加额");
+	//	vStrDic.push_back("期初现金及现金等价物余额");
+
+	//	vector<int> vIntMul;
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+	//	vIntMul.push_back(1);
+
+	//	FIV_RET fivRet = fIvTableFormCheck(vValMapChn, vStrDic, vIntMul);
+	//	if (fivRet == FIV_CHK_OK) LOG(INFO) << "Matched!";
+	//}
+
+}
+
+//void cellLineOCR(long ocr,Mat grayImg, iTableFormCell& cellResult)
+//{
+//	iRecogText::lineOCR(ocr,grayImg,cellResult);
+//}

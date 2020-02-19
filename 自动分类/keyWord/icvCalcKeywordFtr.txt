@@ -1,0 +1,680 @@
+#include "stdafx.h"
+#include "icvCalcKeywordFtr.h"
+#include "LineSegment.h"
+#include "OCREngine.h"
+#include "fiv_table_ocr.h"
+//#include "EnglishWordRecognition.h"
+#include "EngSegment.h"
+
+typedef struct _tagOcrHandle {
+	long engHandle;		/// <英文识别引擎>
+	long chnHandle;		/// <原版中文识别引擎，基于投影切分>
+	long mivHandle;		/// <miv重构中文识别引擎，基于连通域切分>
+}icvOcrHandle;
+
+
+long icvInitOcrHandle(string modelPath) {
+	long chnHandle = OCREngine_LoadDic((modelPath + "/A11052Trn-filter.dic").c_str());
+	if (chnHandle <= 0) {
+		LOG(ERROR) << "中文识别引擎加载失败！";
+		return -1;
+	}
+	
+	long engHandle = EngSeg_Init(modelPath);
+	if (engHandle <= 0) {
+		LOG(ERROR) << "英文识别引擎加载失败！";
+		OCREngine_FreeDic(chnHandle);
+		return -1;
+	}
+
+	long mivHandle = fIv_table_ocr_init(modelPath);
+	if (mivHandle <= 0) {
+		LOG(ERROR) << "中文识别引擎加载失败！";
+		OCREngine_FreeDic(chnHandle);
+		EngSeg_Unit(engHandle);
+		return -1;
+	}
+
+	icvOcrHandle* engine = new icvOcrHandle;
+	engine->chnHandle = chnHandle;
+	engine->engHandle = engHandle;
+	engine->mivHandle = mivHandle;
+	return long(engine);
+}
+
+void icvUnInitOcrHandle(long& handle) {
+	if (handle > 0) {
+		icvOcrHandle* engine = (icvOcrHandle*)handle;
+		if (engine->chnHandle > 0) {
+			OCREngine_FreeDic(engine->chnHandle);	engine->chnHandle = 0;
+		}
+		if (engine->engHandle > 0) {
+			EngSeg_Unit(engine->engHandle);			engine->engHandle = 0;
+		}
+		if (engine->mivHandle > 0) {
+			fIv_table_ocr_uninit(engine->mivHandle);engine->mivHandle = 0;
+		}
+		delete engine; engine = NULL;
+	}
+	handle = 0;
+}
+
+
+
+struct Segment{
+	int start;
+	int len;
+};
+
+void icvRowSegmentation(Mat& binImage, int hh, vector<Segment>& hSegments);
+
+
+bool icvGetRoiImageStrEng(long handle, Mat roiMat, vector<vector<string>>& arrStr) {	
+	icvOcrHandle* engine = (icvOcrHandle*)handle;
+	arrStr.clear();
+
+	string out;
+	GetString(roiMat, 2, engine->engHandle, out);
+	//string str;
+	//float dcf;
+	//fIv_table_ocr_form(engine->mivHandle, FIV_TABLE_CHAR_ENG, ~roiMat, str, dcf);
+		
+	/// <识别结果转化>
+	vector<string> vecStr;
+	for (int i = 0; i < out.size(); i++) {	
+		if (out.substr(i, 1) == " ") {
+			continue;
+		}
+		vecStr.push_back(out.substr(i, 1));
+		vecStr.push_back(out.substr(i, 1));
+		vecStr.push_back(out.substr(i, 1));
+	}
+	arrStr.push_back(vecStr);
+	return true;
+}
+
+void BorderNoiseRemove(const Mat& binImg,Mat& binImg_removed)
+{
+	Mat reduce_y,reduce_x;
+	Mat binImg_tmp = binImg/255;
+	reduce(binImg_tmp,reduce_y,0,CV_REDUCE_SUM,CV_32FC1);//Y方向投影
+	reduce(binImg_tmp,reduce_x,1,CV_REDUCE_SUM,CV_32FC1);//X方向投影
+	Mat gaussian_reducex,gaussian_reducey;
+	GaussianBlur(reduce_y,gaussian_reducey,Size(1,5),0,0);
+	GaussianBlur(reduce_x,gaussian_reducex,Size(5,1),0,0);
+	int topX = 0,topY = 0;
+	int bottomX = binImg_tmp.cols - 1,bottomY = binImg_tmp.rows - 1;
+	float* ptrY = gaussian_reducey.ptr<float>(0);
+	for(int i = 0; i < gaussian_reducey.cols; i++)
+	{		
+		if((int)ptrY[i]>0)
+		{
+			topX  = i;
+			break;
+		}
+	}
+	if(topX == gaussian_reducey.cols-1)//全黑图像直接返回，binImg_removed是原图的拷贝
+		return;
+
+	for(int i = gaussian_reducey.cols-1; i >= topX; i--)
+	{		
+		if((int)ptrY[i]>0)
+		{
+			bottomX  = i;
+			break;
+		}
+	}
+
+	for(int i = 0; i < gaussian_reducex.rows; i++)
+	{
+		if((int)gaussian_reducex.at<float>(i,0)>0)
+		{
+			topY = i;
+			break;
+		}
+	}
+	if(topY == gaussian_reducex.rows-1)//全黑图像直接返回，binImg_removed是原图的拷贝
+		return;
+
+	for(int i = gaussian_reducex.rows-1; i >= topY; i--)
+	{
+		if((int)gaussian_reducex.at<float>(i,0)>0)
+		{
+			bottomY = i;
+			break;
+		}
+	}
+
+	binImg_removed = binImg(Rect(topX,topY,bottomX-topX+1,bottomY-topY+1)).clone();
+	return ;
+}
+
+void icvGetRoiImageStr(long handle, Mat roiMat, int hh, vector<vector<string>>&arrStr, bool bOri) {
+	icvOcrHandle* engine = (icvOcrHandle*)handle;
+	int charW = min(hh, roiMat.cols);
+	int nHeight = roiMat.rows;
+	int nWidth  = roiMat.cols;
+
+	
+	vector<Segment> hSegments;
+	icvRowSegmentation(roiMat, hh, hSegments);
+
+	vector<Mat> wordMats;
+	vector<Mat> lineWordMats;
+	vector<vector<Mat>> vecLineMats;
+
+	if (bOri == false)
+	{
+		/// <新版本的切分识别算法>
+		for (int j = 0; j < hSegments.size(); j++) {
+			Rect rect1;
+			rect1.x = 0;
+			rect1.y = hSegments[j].start;
+			rect1.width = nWidth;
+			rect1.height = hSegments[j].len;
+
+			if (rect1.y < 0 || rect1.y + rect1.height > nHeight) {
+				continue;
+			}
+
+			Mat binImager,binImager1;
+			binImager = roiMat(rect1);
+
+			string str;
+			float dcf;
+			fIv_table_ocr_form(engine->mivHandle, FIV_TABLE_CHAR_CHNNUMPUNC, binImager, str, dcf);
+			vector<string> vecStr;
+			vecStr.clear();
+			for (int i = 0; i < str.size(); i++) {
+				string tmp = "";
+				if ((str[i] & 0x80) >> 7) {
+					tmp = str.substr(i, 2);
+					i++;
+				} else {
+					tmp = str[i];
+				}
+				vecStr.push_back(tmp);
+				vecStr.push_back(tmp);
+				vecStr.push_back(tmp);
+			}
+			arrStr.push_back(vecStr);
+		}
+
+		return;
+	}
+
+	/// <老版本的切分识别算法>
+	for (int j=0;j<hSegments.size();j++) {
+		vector<Mat> lineWordMats;
+		Rect rect1;
+		rect1.x = 0;
+		rect1.y = hSegments[j].start;
+		rect1.width = nWidth;
+		rect1.height = hSegments[j].len;
+
+		if (rect1.y < 0 || rect1.y + rect1.height > nHeight) {
+			continue;
+		}
+
+		Mat binImager,binImager1;
+		binImager = roiMat(rect1);
+		binImager1 = binImager.clone();
+		vector<cv::Rect> tCutRects;
+		int whitepixels = countNonZero(binImager1);
+		Mat tmpbin = Mat::zeros(binImager1.rows+8,binImager1.cols+8,CV_8UC1);
+		binImager1.copyTo(tmpbin(Rect(4,4,binImager1.cols,binImager1.rows)));
+		binImager1 = tmpbin.clone();
+
+		if (whitepixels<20) {
+			continue;
+		}
+		BorderNoiseRemove(binImager1, binImager1);
+		if (!binImager1.empty()) {
+			LINESEGMENT_SegmentByProfile(binImager1, tCutRects);
+			//LINESEGMENT_PostProcess(binImager1, tCutRects);		
+		}
+
+		int maxcharW = 0;
+		for (int k=0;k<tCutRects.size();k++) {
+			if (tCutRects[k].width + tCutRects[k].x>binImager1.cols)
+				continue;
+			if(tCutRects[k].width>maxcharW)
+				maxcharW = tCutRects[k].width;
+		}
+
+		for (int k=0;k<tCutRects.size();k++) { 
+			if (tCutRects[k].width<3 || tCutRects[k].height<3 || tCutRects[k].width + tCutRects[k].x>binImager1.cols ||tCutRects[k].height + tCutRects[k].y>binImager1.rows) {
+				continue;
+			}
+
+			for (int r = tCutRects[k].y; r < tCutRects[k].br().y; r++) { //上
+				int black = countNonZero(255 - binImager1.row(r).colRange(tCutRects[k].x,tCutRects[k].x+tCutRects[k].width));
+				if (black>1) {
+					tCutRects[k].height = tCutRects[k].br().y - r;
+					tCutRects[k].y = r;						
+					break;
+				}
+			}
+
+			for (int r = tCutRects[k].y + tCutRects[k].height - 1; r > tCutRects[k].y ;r--) {	//下
+				int black = countNonZero(255 - binImager1.row(r).colRange(tCutRects[k].x,tCutRects[k].x+tCutRects[k].width));
+				if (black>1) {
+					tCutRects[k].height = r - tCutRects[k].y;
+					break;
+				}
+			}
+
+			for (int r = tCutRects[k].x; r < tCutRects[k].x + tCutRects[k].width ;r++) {	//左
+				int black = countNonZero(255 - binImager1.col(r).rowRange(tCutRects[k].y,tCutRects[k].y+tCutRects[k].height));
+				if (black>1) {
+					tCutRects[k].width = tCutRects[k].width - (r - tCutRects[k].x);
+					tCutRects[k].x = r ;
+					break;
+				}
+			}
+
+			if (k==0 && tCutRects[k].width>25) {  
+				for (int r= tCutRects[k].x; r<tCutRects[k].x + tCutRects[k].width *0.15;r++) {
+					int black1 = countNonZero(255 - binImager1.col(r).rowRange(tCutRects[k].y,tCutRects[k].y+tCutRects[k].height));
+					int black2 = countNonZero(255 - binImager1.col(r+1).rowRange(tCutRects[k].y,tCutRects[k].y+tCutRects[k].height));
+
+					int whitepixels = 0;
+					if (black1>0 && black2 ==0) {
+						int r1 = 0;
+						for (r1= r+1; r1<tCutRects[k].x+ tCutRects[k].width *0.2;r1++) {
+							int black = countNonZero(255 - binImager1.col(r1).rowRange(tCutRects[k].y,tCutRects[k].y+tCutRects[k].height));
+							if (black==0) {
+								whitepixels ++;
+							} else {
+								break;
+							}
+						}
+						r = r1;
+					}
+
+					if (whitepixels>(float)hh*0.1) {
+						tCutRects[k].width = tCutRects[k].width - (r - tCutRects[k].x);
+						tCutRects[k].x = r ;
+						break;
+					}
+				}
+			}
+
+			for (int r= tCutRects[k].x + tCutRects[k].width-1;r>tCutRects[k].x ;r--) {	/// 右
+				int black = countNonZero(255 - binImager1.col(r).rowRange(tCutRects[k].y,tCutRects[k].y+tCutRects[k].height));
+				if (black > 1) {
+					tCutRects[k].width = r - tCutRects[k].x;
+					break;
+				}
+			}
+
+			if (tCutRects[k].width < charW * 0.2 || tCutRects[k].height < charW * 0.1 || tCutRects[k].width > charW * 2.5 || tCutRects[k].height > charW * 2.5) {
+				continue;
+			}
+			if ((float)tCutRects[k].width / tCutRects[k].height > 2.5 || (float)tCutRects[k].width / tCutRects[k].height < 0.5) {
+				continue;
+			}
+
+			wordMats.push_back(binImager1(tCutRects[k]));
+			lineWordMats.push_back(binImager1(tCutRects[k]));				
+		}
+		vecLineMats.push_back(lineWordMats);
+	}	
+
+	char word1[3] = {0};
+	char word2[3] = {0};
+	char word3[3] = {0};
+	vector<vector<string>> ocrResult;
+	for(int i = 0; i < vecLineMats.size(); i++) {
+		vector<string> tmpOcrResult;
+
+		int wordsNum = vecLineMats[i].size();
+		for (int k = 0; k < wordsNum; k++) {
+			Mat binImg;
+			threshold(vecLineMats[i][k], binImg, 128, 255, CV_THRESH_BINARY);
+			tstring strChar;
+			long dmin[10];
+			bool bRet = OCREngine_Char(engine->chnHandle, CHARSET_ALL, binImg, strChar, dmin);
+			if (bRet) {
+				int nMax = 3;
+				if (nMax > strChar.size()) {
+					nMax = strChar.size();
+				}
+				int m = 0;
+				for (; m < nMax; m++) {
+					tmpOcrResult.push_back(classToStr(strChar.substr(m, 1)));
+				}
+				for (; m < 3; m++) {
+					tmpOcrResult.push_back(" ");
+				}
+				
+			}                                			
+		}
+		ocrResult.push_back(tmpOcrResult);
+	}	
+
+	arrStr = ocrResult;
+}
+
+int MPSmoothDistribution1D(Mat& distrib, int iKernelWidth, int iterNum) {
+	if (distrib.empty() || distrib.type() != CV_32FC1 || iKernelWidth < 1 || iterNum < 1) {
+		return false;
+	}
+	int i, j, elemNum, iter;
+	if (iKernelWidth == 1) {
+		return true;
+	}
+
+	elemNum = distrib.rows == 1 ? distrib.cols : distrib.rows;
+	for (iter = 0; iter < iterNum; iter++) {	//平滑投影图
+		for (i = iKernelWidth/2; i< elemNum-iKernelWidth/2; i++) {
+			double sum = 0;
+			for (j = -iKernelWidth/2; j < iKernelWidth/2+1; j++) {
+				sum += distrib.at<float>(i+j);
+			}
+			distrib.at<float>(i) = sum/iKernelWidth;
+		}
+	}
+
+	return true;
+}
+
+int MPFindPeakofDistribution1D(Mat distrib, int iKernelWidth, vector<int>& peaks, float alpha, float beta) {
+	if (distrib.empty() && distrib.type() != CV_32FC1) {
+		return false;
+	}
+	int i, j, elemNum;
+	double meanVal = 0.0, thresh = 0.0;
+	elemNum = distrib.rows == 1 ? distrib.cols : distrib.rows;
+	meanVal = cv::mean(distrib)(0);
+
+	double maxVal = -1.0;
+	for (i = 0; i < elemNum; ++i) {
+		if (distrib.at<float>(i) > maxVal) {
+			maxVal = distrib.at<float>(i);
+		}
+	}
+
+	thresh = alpha*meanVal+beta*maxVal;
+	thresh = max(thresh,(double)4);
+	peaks.clear();
+	for (i = 0; i < iKernelWidth/2; ++i) {
+		for (j = -i; j < iKernelWidth/2+1; ++j) {
+			if (distrib.at<float>(i) < distrib.at<float>(i+j)+0.00001) {
+				break;
+			}
+		}
+		if (j == iKernelWidth/2+1 && distrib.at<float>(i) > thresh) {
+			peaks.push_back(i);
+		}
+	}
+
+	for (i = iKernelWidth/2; i < elemNum-iKernelWidth/2; ++i) {		//找出平滑后的投影图的波峰位置
+		for (j = -iKernelWidth/2; j < iKernelWidth/2+1; ++j) {
+			if (j != 0) {
+				if (distrib.at<float>(i) < distrib.at<float>(i+j)+0.00001) {
+					break;
+				}
+			}	
+		}
+
+		if (j == iKernelWidth/2+1 && distrib.at<float>(i) > thresh) {
+			peaks.push_back(i);
+		}
+	}
+
+	for (i = elemNum-iKernelWidth/2; i < elemNum; ++i) {
+		for (j = -iKernelWidth/2; j < elemNum-i; ++j) {
+			if (distrib.at<float>(i) < distrib.at<float>(i+j)+0.00001) {
+				break;
+			}
+		}
+		if (j == elemNum-i && distrib.at<float>(i) > thresh) {
+			peaks.push_back(i);
+		}
+	}
+	return true;
+}
+
+bool findCharTopBottomLines(Mat orhProjection, Mat hProjection, vector<int> peaks, int iCharHeight, vector<int>& startRows, vector<int>& endRows) {
+		if (hProjection.empty() || hProjection.rows < hProjection.cols || peaks.size()==0 || iCharHeight <= 0) {
+			return false;
+		}
+
+		int i, j;
+		startRows.resize(peaks.size());
+		endRows.resize(peaks.size());
+		for (j = peaks[0]; j >= 0; --j) {
+			if (orhProjection.at<float>(j,0) < 0.00001) {
+				break;
+			}
+		}
+		if (j <= 0) {
+			startRows[0] = peaks[0]-iCharHeight*0.6 < 0 ? 0 : peaks[0]-iCharHeight*0.6;
+		} else {		
+			if (peaks[0] -j > iCharHeight*0.7 ) {
+				int minVal = FLT_MAX;
+				int minj = -1;
+				for (j = peaks[0]; j > 0; --j) {
+					if (hProjection.at<float>(j,0)  < minVal-0.00001 ) {
+						minVal = hProjection.at<float>(j,0);
+						minj = j;
+					}
+
+					if (minj>0 && peaks[0] -minj > iCharHeight*0.6) {
+						break;
+					}
+				}
+
+				if (minj>0) {
+					startRows[0] = minj;
+				} else {
+					startRows[0] = peaks[0] - iCharHeight*0.6;
+				}
+			} else {
+				startRows[0] = j;
+			}
+		}
+
+		for (i = 0; i < peaks.size()-1; ++i) {
+			float minVal = FLT_MAX;
+			int minj = -1;
+			for (j = peaks[i]; j < peaks[i+1]; ++j) {
+				if (hProjection.at<float>(j,0) < minVal-0.00001) {
+					minVal = hProjection.at<float>(j,0);
+					minj = j;
+				}
+
+				if (j - peaks[i] > iCharHeight*0.6) {
+					break;
+				}
+			}
+			endRows[i] = minj;
+			startRows[i+1] = minj+1;
+
+			/****************************************/
+			if (i && endRows[i] - startRows[i]>iCharHeight*1.3) {
+				minVal = FLT_MAX;
+				minj = -1;
+				for (j = peaks[i]; j > peaks[i-1]; --j) {
+					if (hProjection.at<float>(j,0)  < minVal-0.00001 ) {
+						minVal = hProjection.at<float>(j,0);
+						minj = j;
+					}
+
+					if (minj>0 && peaks[i] - minj > iCharHeight*0.6) {
+						break;
+					}
+				}
+				if (minj>0) {
+					startRows[i] = minj;
+				}
+			}
+		}
+
+		float minVal = FLT_MAX;
+		int minj = -1;
+		for (j = peaks[peaks.size()-1]; j < hProjection.rows; ++j) {
+			if (hProjection.at<float>(j,0) < 1.00001) {
+				minj = j;
+				break;
+			}
+
+
+			if (hProjection.at<float>(j,0) < minVal-0.00001) {
+				minVal = hProjection.at<float>(j,0);
+				minj = j;
+			}
+
+			if (j - peaks[peaks.size()-1] > iCharHeight) {
+				break;
+			}
+		}
+
+		if (j == hProjection.rows-1 || minj- startRows[peaks.size()-1]<0.8*iCharHeight) {
+			endRows[peaks.size()-1] = peaks[peaks.size()-1]+iCharHeight*2/3 > hProjection.rows-1 ? hProjection.rows-1 : peaks[peaks.size()-1]+iCharHeight*2/3;
+		} else {
+			endRows[peaks.size()-1] = minj;
+		}
+
+		if (peaks.size()>1 && endRows[peaks.size()-1] - startRows[peaks.size()-1]>iCharHeight*1.3) {
+			float minVal = FLT_MAX;
+			int minj = -1;
+			for (j = peaks[peaks.size()-1]; j > peaks[peaks.size()-2]; --j) {
+				if (hProjection.at<float>(j,0)  < minVal-0.00001) {
+					minVal = hProjection.at<float>(j,0);
+					minj = j;
+				}
+
+				if (peaks[peaks.size()-1]-j> iCharHeight*0.5) {
+					break;
+				}
+			}
+
+			if (minj>0) {
+				startRows[peaks.size()-1] = minj;
+			}
+		}
+		/****************************************/
+		return true;
+}
+
+void icvRowSegmentation(Mat& binImage,int hh, vector<Segment>& hSegments) {
+	Mat openImge;
+	erode(binImage,openImge,Mat::ones(3,3,CV_8U));
+	dilate(binImage,openImge,Mat::ones(3,3,CV_8U));
+	dilate(openImge,openImge,Mat::ones(3,3,CV_8U));
+	
+	if (countNonZero(binImage) == 0)
+		return;
+
+	vector<vector<Point>> contours;
+	findContours(binImage.clone(), contours, CV_RETR_TREE , CV_CHAIN_APPROX_NONE); //查找连通区域
+
+	int maxspotW = (hh > 80) ? 7 : 5;
+	if (!contours.empty()) {
+		for (int idx = contours.size() - 1; idx > 0; idx--) {
+			Rect cBoundingBox = boundingRect(Mat(contours[idx]));
+			if (cBoundingBox.height < maxspotW && cBoundingBox.width < maxspotW) {
+				if (countNonZero(binImage(cBoundingBox)) < maxspotW * 2 - 2) {
+					binImage(cBoundingBox) = Scalar(0);
+				}
+			}
+			if (cBoundingBox.height < 10 && cBoundingBox.width > hh * 4) { //去掉干扰的直线
+				binImage(cBoundingBox) = Scalar(0);
+				openImge(cBoundingBox) = Scalar(0);
+			}
+		}
+	}
+
+	Mat hProjection;
+	Mat orhProjection;
+	vector<int> rowStart, rowEnd;
+	vector<int> peaks;
+	vector<int> peakDists;
+
+	cv::reduce(openImge, hProjection, 1, CV_REDUCE_AVG, CV_32FC1);
+	orhProjection = hProjection.clone();
+
+	//20140104修改
+	int element    = (hh > 65) ? 7 : 5;
+	int iterations = 20;
+
+	if (hh>40) {
+		iterations = 20 + (hh - 40) % 15 * 10;
+	}
+
+	MPSmoothDistribution1D(hProjection, element, iterations);
+	MPFindPeakofDistribution1D(hProjection, 5, peaks, 0.20, 0.0);
+
+	if (peaks.size() == 0) {
+		return;
+	}	
+
+	//合并相隔比较近的波峰
+	if (peaks.size()>1) {
+		peakDists.resize(peaks.size()-1);	
+		for (int i = 1; i < peaks.size(); ++i) {
+			peakDists[i-1] = peaks[i] - peaks[i-1];
+		}
+	}
+
+	int iCharHeight = hh;
+	if (peakDists.size()) {
+		std::sort(peakDists.begin(), peakDists.end());
+		for (int i = 1; i < peaks.size(); ++i) {
+			if (peaks[i]-peaks[i-1] < iCharHeight*2/3) {
+				peaks[i] = (peaks[i-1]+peaks[i])/2;
+				peaks[i-1] = -1;
+			}
+		}
+
+		peaks.erase(remove_if(peaks.begin(), peaks.end(), [&](int val){return val == -1;}), peaks.end());
+	}
+
+	//支票关键字下边缘有粘连时会导致分割错误，所有从新计算波峰
+	if(peaks.size()==1) {
+		if (hProjection.rows - peaks[0]<0.3*hh) {
+			int starti=0;
+			for (int i=0;i<orhProjection.rows;i++) {
+				if (orhProjection.at<float>(i,0)>2) {
+					starti = i;
+					break;
+				}
+			}
+
+			if (starti + 0.55*hh<hProjection.rows ) {
+				peaks[0] = starti + 0.55*hh;
+			}
+		}
+	}
+
+	//获取每行字符的上下边缘
+	cv::reduce(openImge, hProjection, 1, CV_REDUCE_AVG, CV_32FC1);
+
+	if (hh<85) {
+		MPSmoothDistribution1D(hProjection, 5, 15);
+	} else {
+		MPSmoothDistribution1D(hProjection, 7, 20);
+	}
+	findCharTopBottomLines(orhProjection,hProjection, peaks, iCharHeight, rowStart, rowEnd);	
+
+	peaks.clear();
+	peakDists.clear();
+
+	Segment hSegment;
+	int iStartRow, iEndRow;
+	for (int k = 0; k < rowStart.size(); k++) {
+		//找出文字行的上下边缘
+		iStartRow = rowStart[k];
+		iEndRow = rowEnd[k];
+
+		if (iEndRow - iStartRow<20) {
+			continue;
+		}
+
+		hSegment.start = rowStart[k];
+		hSegment.len = rowEnd[k] - rowStart[k];
+		hSegments.push_back(hSegment);
+	}
+}

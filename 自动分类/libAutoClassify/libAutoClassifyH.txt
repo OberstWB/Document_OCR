@@ -1,0 +1,612 @@
+/// =============================================================================
+/// <							自动分类算法										>
+/// <--------------------------------------------------------------------------->
+/// <	创建作者: wangbo															>
+/// <	创建时间: 2017-10-26														>
+/// <	算法版本: v1.0.0.1														>
+/// <--------------------------------------------------------------------------->
+/// <	版本说明:	当前版本是对老版本算法的重新梳理与模块化，无本质更新						>
+/// <	当前版本主要采用了大小、线条、关键字特征										>
+/// <	部分采用了LOGO和颜色特征													>
+/// <	身份证检测部分属于全局LOGO特征												>
+/// <	局部LOGO特征暂时未用到，两个原因：sift不够稳定、其他特征足矣						>
+/// <	代理人身份证核查、国税等通过固定区域红章判定属于局部颜色特征						>
+/// <	全局颜色特征暂时未用到，主要原因是：通过其他特征可以完成分类，同时特征提取未固化		>
+/// <--------------------------------------------------------------------------->
+/// <	算法简介:																	>
+/// <	现有自动分类算法基于如下特征进行样本的分类										>
+/// <	(1) 大小，根据大小进行对输入样本进行简单粗分类									>
+/// <	(2) 线条，根据输入样本的线条特征进行二级粗分类									>
+/// <	(3) 关键字，根据输入样本的关键字信息进行三级粗分类								>
+/// <	(4) 颜色，根据输入样本的版面颜色进行粗分类										>
+/// <	(5) LOGO，根据输入样本的LOGO信息进行粗分类									>
+/// <	(6) 实际上，颜色和LOGO特征要分为全局和局部两种									>
+/// <		全局颜色特征表现为背景颜色，局部颜色特征表现为前景颜色						>
+/// <		全局LOGO特征表现为位置不固定但必定有的LOGO，局部LOGO特征表现为位置固定		>
+/// <--------------------------------------------------------------------------->
+/// <	算法框架：																>
+/// <	自动分类算法采用漏斗状逐层筛选过滤方式进行分类									>
+/// <	在分类前期采用一些弱特征进行粗筛选，在分类后期采用强特征进行细致分类				>
+/// <	弱特征：有一定分类能力，但其分类能力非常弱，表现为全局特征，如大小、背景色、线条等	>
+/// <	强特征：具备较强的分类能力，但计算耗时，表现为局部特征，如关键字、LOGO等			>
+/// <	基于以上分析，自动分类算法分类两个模块：全局过滤、局部细分						>
+/// <--------------------------------------------------------------------------->
+/// <	待添加内容：																>
+/// <	(1) 颜色特征统计功能，全局颜色特征统计+局部颜色特征判别							>
+/// <	(2) LOGO特征统计功能，全局LOGO特征检测+局部LOGO特征提取与判别					>
+/// <	(3) Layout特征统计功能，理论上Layout属于全局特征，表征了样例的版面配置信息		> 
+/// =============================================================================
+///	<|||||||| 		 //\\		 	  //========			//\\		||||||||>
+///	<|||||||| 	    //  \\		 	 //					   //  \\		||||||||>
+///	<|||||||| 	   //    \\		    //					  //    \\		||||||||>
+///	<|||||||| 	  //      \\	   //					 //      \\		||||||||>
+///	<|||||||| 	 //        \\	   \\					//        \\	||||||||>
+///	<||||||||   //==========\\	    \\				   //==========\\	||||||||>
+///	<||||||||  //			 \\	 	 \\				  //			\\	||||||||>
+///	<|||||||| //			  \\	  \\========	 //				 \\	||||||||>
+/// =============================================================================
+#include "stdafx.h"
+#include "libAutoClassify.h"
+
+/// <与分类相关的各个模块头文件>
+#include "icvIdCard.h"
+#include "icvEmblem.h"
+#include "icvCalcFormFtr.h"
+#include "icvCalcColorFtr.h"
+#include "icvTemplateInfo.h"
+#include "icvAutoClassifyBasedForm.h"
+#include "icvAutoClassifyBasedSize.h"
+#include "icvAutoClassifyBasedLogo.h"
+#include "icvAutoClassifyBasedColor.h"
+#include "icvAutoClassifyPreprocess.h"
+#include "icvAutoClassifyBasedKeywords.h"
+
+#define  USE_NORM_DPI_200
+#ifdef USE_NORM_DPI_200
+#include "libReadImageByFreeImage.h"
+#endif
+
+
+//#define ENCRYPT_LIC
+#ifdef ENCRYPT_LIC
+#include "libMPLicVerify.h"
+#ifdef _WIN64
+#ifdef _DEBUG
+#pragma comment(lib, "cryptlib_MD_x64d.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x64d.lib")
+#else
+#pragma comment(lib, "cryptlib_MD_x64.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x64.lib")
+#endif
+#else
+#ifdef _DEBUG
+#pragma comment(lib, "cryptlib_MD_x86d.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x86d.lib")
+#else
+#pragma comment(lib, "cryptlib_MD_x86.lib")
+#pragma comment(lib, "libMPLicVerify_MD_x86.lib")
+#endif
+#endif
+#endif
+
+/// -----------------------------------------------------------------------------
+struct docImgClassifyEngine {
+	long ocrHandle;					/// <中文字符识别引擎>
+	long idHandle;					/// <身份证检测引擎>
+	long colorHandle;				/// <颜色模型引擎>
+	GlobalDICStrategy strategy;		/// <匹配策略>
+	vector<ImageTemplate> vecIT;	/// <分类模板>
+};
+
+#define ACA_AUTHOR	"wangbo"
+#define ACA_TIME	"2017-10-26"
+#define ACA_VERSION "v1.0.0.1"
+
+/// =============================================================================
+/// <根据引擎句柄初始化候选列表>
+void icvAutoClassify_init_candiList(long handle, vector<int>& vecIndex) {
+	vecIndex.clear();
+	if (handle <= 0) {
+		return;
+	}
+
+	docImgClassifyEngine* engine = (docImgClassifyEngine*)handle;	
+	vector<ImageTemplate> vecIT = engine->vecIT;
+	for (int idx = 0; idx < vecIT.size(); idx++) {
+		vecIndex.push_back(idx);
+	}
+}
+
+
+	
+	/// <身份证检测引擎>
+	string strEnginePath = enginePath;
+	long idHandle = icvIdCard_init(strEnginePath);
+	if (idHandle <= 0) {
+		LOG(ERROR) << "身份证检测引擎加载失败！请检查模板文件路径" << strEnginePath + "/ID_Copies_Front.xml";
+		return -1;
+	}
+
+	/// <中文 OCR 引擎>
+	long ocrHandle = icvAutoClassifyKeyword_init(strEnginePath);
+	if (ocrHandle <= 0) {
+		LOG(ERROR) << "OCR引擎加载失败！请检查OCR 模型路径" << strEnginePath;
+		icvIdCard_uninit(idHandle);
+		return -1;
+	}
+
+	/// <颜色模型>
+	long colorHandle = icvColor_Init((strEnginePath + "/color_2wc_uchar.bin").c_str());
+	if (colorHandle <= 0) {
+		LOG(ERROR) << "颜色模型引擎加载失败！请检查颜色模型路径" << strEnginePath;
+		icvIdCard_uninit(idHandle);
+		icvAutoClassifyKeyword_uninit(ocrHandle);
+		return -1;
+	}
+
+	/// <分类策略文件加载>
+	GlobalDICStrategy strategy;
+	int nRet = icvAutoClassifyLoadStrategy(xmlStrategyFile, strategy);
+	if (nRet <= 0) {
+		LOG(ERROR) << "策略文件加载失败！请检查策略文件路径 "<< xmlStrategyFile;
+		icvIdCard_uninit(idHandle);
+		icvColor_UnInit(colorHandle);
+		icvAutoClassifyKeyword_uninit(ocrHandle);	
+		return -1;
+	}
+
+	/// <根据策略文件加载模板特征文件>
+	vector<ImageTemplate> vecIT;
+	string strDatPath;
+	if (datPath == NULL || datPath[0] == 0) {
+		int nIndex1 = string(xmlStrategyFile).find_last_of('\\');
+		int nIndex2 = string(xmlStrategyFile).find_last_of('/');
+		int nIndex = max(nIndex1, nIndex2);
+		if (nIndex == -1) {
+			LOG(ERROR) << "DAT文件路径未设置/异常!";
+			icvIdCard_uninit(idHandle);
+			icvColor_UnInit(colorHandle);
+			icvAutoClassifyKeyword_uninit(ocrHandle);	
+			return -1;
+		} else {
+			strDatPath = string(xmlStrategyFile).substr(0, nIndex + 1);
+		}	
+
+	} else {
+		strDatPath = datPath;
+	}
+
+	/// <加载模板特征信息>
+	for (int i = 0; i < strategy.vecTemplates.size(); i++) {
+		ImageTemplate curIT;
+		nRet = icvAutoClassifyLoadTemplate((strDatPath + strategy.vecTemplates[i].strDatFile).c_str(), curIT);
+		if (nRet <= 0) {
+			LOG(ERROR) << "模板文件加载失败！请检查策略文件路径" << strDatPath + strategy.vecTemplates[i].strDatFile;
+			icvIdCard_uninit(idHandle);
+			icvColor_UnInit(colorHandle);
+			icvAutoClassifyKeyword_uninit(ocrHandle);			
+			return -1;
+		}
+
+		/// <临时统计模板的颜色特征>
+		//if (strategy.index[5].bSelected && strategy.index[5].type == FtrType::ICV_MT_COLOR && false) {
+		//	Mat colorImg = imread((strDatPath + strategy.vecTemplates[i].strImgName).c_str(), IMREAD_COLOR);
+		//	Mat grayImg, binImg;
+		//	icvAutoClassifyPreprocess(colorImg, grayImg, binImg);
+
+		//	vector<vector<float>> barcodelines;
+		//	vector<FormInfo> CFormInfo;
+		//	Point2f referPt = Point(0,0);
+		//	float sinA;
+		//	Mat tmpImg = ~binImg;
+		//	int nRet = icvCalcFormInfo(tmpImg, barcodelines, CFormInfo, referPt, sinA);			
+		//	int nBackColor = -1;					
+		//	icvColor_calcFtr(colorHandle, colorImg, ~binImg, nBackColor);
+		//	curIT.gBackColor.bUseColor = true;
+		//	curIT.gBackColor.nColorType = nBackColor;
+		//	if (nRet > 0) {		/// <有Form时才进行线条颜色估计以及依据线条颜色进行粗分类>
+		//		Mat lineImg = tmpImg & binImg;
+		//		int nLineColor = -1;
+		//		erode(lineImg, lineImg, Mat::ones(3, 3, CV_8UC1));
+		//		icvColor_calcFtr(colorHandle, colorImg, lineImg, nLineColor);
+		//		curIT.gLineColor.bUseColor = true;
+		//		curIT.gLineColor.nColorType = nLineColor;
+		//	} else {
+		//		curIT.gLineColor.bUseColor = false;
+		//		curIT.gLineColor.nColorType = -1;
+		//	}	
+		//}				
+
+		/// <模板图像DPI和模板名称>
+		curIT.tName = strategy.vecTemplates[i].strTepName;
+		curIT.tDpi  = strategy.vecTemplates[i].dpi;
+		vecIT.push_back(curIT);
+	}
+	
+	/// <分类引擎参数配置>
+	docImgClassifyEngine* engine = new docImgClassifyEngine();
+	if (NULL == engine) {
+		icvIdCard_uninit(idHandle);
+		icvColor_UnInit(colorHandle);
+		icvAutoClassifyKeyword_uninit(ocrHandle);
+		LOG(ERROR) << "分类引擎开辟空间失败！";
+		return -1;
+	}
+	engine->idHandle		= idHandle;
+	engine->ocrHandle	= ocrHandle;
+	engine->colorHandle = colorHandle;
+	engine->strategy		= strategy;
+	engine->vecIT		= vecIT;
+
+	return long(engine);
+}
+
+/// <匹配顺序可变的自动分类算法>
+int icvAutoClassify_form(long handle, Mat colorImg, vector<int>& vecIndex) {
+	if (handle <= 0 || colorImg.empty()) {
+		vecIndex.clear();
+		return -1;
+	}
+
+	docImgClassifyEngine* engine = (docImgClassifyEngine*)handle;
+	GlobalDICStrategy strategy = engine->strategy;
+	vector<ImageTemplate> vecIT = engine->vecIT;
+	long idHandle = engine->idHandle;
+	long ocrHandle = engine->ocrHandle;
+	long colorHandle = engine->colorHandle;
+
+	/// <筛选需要进行特殊处理的模板标记>
+	/// <身份证相关,身份证复印件、身份证核查+复印件、代理人身份证、身份证核查>
+	/// <税务登记证，国税和地税>
+	/// <机构信用代码证>
+	/// <通用凭证>
+	/// <需要进行特殊处理的模板筛选>
+	int nIdCardCopy = -1;				/// <身份证复印件>
+	int nIdCardCheck = -1;				/// <身份证复印件+身份证核查>
+	int nAgentIdCheck = -1;				/// <代理身份证核查>
+	int nIdCheck = -1;					/// <身份证核查>
+
+	int nStateTax = -1;					/// <税务登记证-国税>
+	int nLandTax = -1;					/// <税务登记证-地税>
+
+	int nCreditCodeWithLogo = -1;		/// <带LOGO的机构信用代码证>
+	int nCreditCodeWithoutLogo = -1;		/// <不带LOGO的机构信用代码证>
+
+	int nPassPort = -1;					/// <护照>
+
+	for (int i = 0; i < vecIT.size(); i++) {
+		string strCurITName = vecIT[i].tName;
+		if (strCurITName == "身份证复印件"){				// 14，身份证复印件，含全局身份证LOGO，检测判定
+			nIdCardCopy = i;
+		} else if (strCurITName == "身份证(1)") {			// 14，身份证复印件，含全局身份证LOGO，检测判定
+			nIdCardCopy = i;
+		} else if (strCurITName == "身份证(2)"){			// 15，身份证核查+身份证复印件，含全局身份证LOGO，检测判定
+			nIdCardCheck = i;
+		} else if (strCurITName == "代理人身份证"){		// 2，代理人身份证核查，固定区域含红色章子
+			nAgentIdCheck = i;
+		} else if (strCurITName == "身份证"){				// 50，身份证核查
+			nIdCheck = i;
+		} else if (strCurITName == "税务登记证（国税）"){	// 71，国税+固定区域红色章子
+			nStateTax = i;
+		} else if (strCurITName == "税务登记证（地税）"){	// 72，地税，地税与国税的区别仅仅在于国和地两个关键字，为增强可分辨性，在国税中添加了红章
+			nLandTax = i;
+		} else if (strCurITName == "机构信用代码证"){		// 60，带有LOGO的机构信用代码证
+			nCreditCodeWithLogo = i;
+		} else if (strCurITName == "机构信用代码证1"){		// 80，不带LOGO的机构信用代码证，通过版面可以区分
+			nCreditCodeWithoutLogo = i;
+		} else if (strCurITName == "护照") {
+			nPassPort = i;
+		}
+	}
+
+	/// <初始化匹配模板>
+	if (vecIndex.size() == 0) {
+		icvAutoClassify_init_candiList(handle, vecIndex);
+	}
+
+	ReferPtInfo refPtInfo; 
+	DocImgInfo imgInfo;
+	imgInfo.nHeight = colorImg.rows;
+	imgInfo.nWidth = colorImg.cols;
+	imgInfo.fratio = max(imgInfo.nWidth, imgInfo.nHeight) * 1.0 / min(imgInfo.nWidth, imgInfo.nHeight);
+
+	/// <预处理，将彩色图像转为二值图像>
+	Mat grayImg, binImg, bwImg;
+	icvAutoClassifyPreprocess(colorImg, grayImg, binImg);
+	bwImg = binImg.clone();
+
+	/// <机构信用代码证，特殊处理，其实这里利用的版面信息>
+	if (nCreditCodeWithoutLogo != -1) {
+		int nWidth = binImg.cols;
+		int nHeight = binImg.rows;
+		float ratio = nWidth * 1.0 / nHeight;
+		if ((ratio > 1.2 && ratio < 2 && nHeight > 1200)) {
+			Mat localMat = binImg(Rect(0, binImg.rows/3, binImg.cols/3, binImg.rows / 2)).clone();
+			int nNoZero = countNonZero(localMat);
+			if (nNoZero < 1500) {
+				vecIndex.clear();
+				vecIndex.push_back(nCreditCodeWithoutLogo);
+				return 1;
+			}
+		}			
+	}
+
+	/// <身份证检测与剔除>
+	/// <如果在图像中查找到身份证，则对身份证复印件和身份证核心进行关键字匹配，有关键字则表明是身份证核查，否则为身份证复印件>
+	/// <如果不存在身份证，将将这两者从候选结果中剔除>
+	/// <事实上，这里利用的全局的LOGO信息，身份证可以视作为一种特殊的LOGO>
+	if (icvAutoClassifyBasedIdCard(idHandle, grayImg, vecIndex, nIdCardCopy, nIdCardCheck)) {		
+		vecIndex.clear();
+		vecIndex.push_back(nIdCardCopy);
+		vecIndex.push_back(nIdCardCheck);
+		icvAutoClassifyBasedKeyword(ocrHandle, binImg, vecIT, refPtInfo, vecIndex, ICV_KEY_COARSE);	
+		if (vecIndex.empty() && nIdCardCheck != -1 && nIdCardCopy != -1) {
+			vecIndex.push_back(nIdCardCopy);
+		}
+		return 1;
+	}		
+
+	/// <护照类别判定，在此之前已完成了非二代证的判定。故这里只需要进行人脸检测即可>
+	if (nPassPort >= 0 && icvIdCard_detect_face(idHandle, grayImg)) {
+		vecIndex.clear();
+		vecIndex.push_back(nPassPort);
+		return 1;
+	}
+
+	/// <大小匹配>
+	int nSizeMatch = 0;
+	if (strategy.index[0].bSelected && strategy.index[0].type == FtrType::ICV_MT_SIZE) {
+		nSizeMatch = icvAutoClassifyBasedSize(colorImg, vecIT, vecIndex);
+	}
+
+	/// <全局背景色匹配>
+	int nBackColorMatch = 0;
+	vector<int> vecTempIndex = vecIndex;
+	if (strategy.index[5].bSelected && strategy.index[5].type == FtrType::ICV_MT_COLOR) {
+		nBackColorMatch = icvAutoClassifyBasedGlobalColor(colorHandle, colorImg, ~bwImg, vecIT, vecIndex, BACK_COLOR);
+	}
+
+	if (vecIndex.size() == 0) {	/// <颜色特征无法区分则返回原始粗分类结果>
+		vecIndex = vecTempIndex;
+	}
+	
+	/// <Form 检测与匹配>
+	/// <线条应当是一个必备特征，如果当前图片没有线条，是否应当将具有线条的那些模板剔除掉呢？>
+	int nFormMatch = 0;
+	vecTempIndex = vecIndex;
+	if (strategy.index[1].bSelected && strategy.index[1].type == FtrType::ICV_MT_LINE) {
+		nFormMatch = icvAutoClassifyBasedForm(binImg, vecIT, refPtInfo, vecIndex);		
+	}
+	
+	/// <当前样本无框线，无将模板中含框线的进行剔除>
+	//if (nFormMatch < 0) {
+	//	for (int i = 0; i < vecIndex.size(); i++) {
+	//		if (vecIT[vecIndex[i]].tForms.size()) {
+	//			vecIndex[i] = -1;
+	//		}
+	//	}
+	//	vecIndex.erase(remove_if(vecIndex.begin(), vecIndex.end(), [&](int a){return a < 0;}), vecIndex.end());
+	//}
+	if (vecIndex.size() == 0) {	/// <Form特征无法区分则返回原始粗分类结果>
+		vecIndex = vecTempIndex;
+	}
+
+	/// <颜色匹配，全局线条>
+	int nLineColorMatch = 0;
+	vecTempIndex = vecIndex;
+	if (strategy.index[5].bSelected && strategy.index[5].type == FtrType::ICV_MT_COLOR && nFormMatch > 0) {
+		Mat lineImg = ~binImg & bwImg;
+		erode(lineImg, lineImg, Mat::ones(3, 3, CV_8UC1));
+		nLineColorMatch = icvAutoClassifyBasedGlobalColor(colorHandle, colorImg, lineImg, vecIT, vecIndex, LINE_COLOR);
+		if (vecIndex.size() == 0) {	/// <颜色特征无法区分则返回原始粗分类结果>
+			vecIndex = vecTempIndex;
+		}
+	}
+	
+	/// <如果没有FORM，则进行国徽检测，国徽用于参考点对齐，事实上XMLToolC中并未用到国徽进行参考点对齐>
+	icvUpdateReferPtInfoBasedEmblem(colorImg, nFormMatch, refPtInfo);
+	
+	/// <如果没有Form匹配且无国徽，则进行title粗匹配+关键字细匹配，理论上能进行一定程度加速>
+	bool bUseTitleMatch = false;
+	if (bUseTitleMatch) {
+		icvAutoClassifyTitleMatch(ocrHandle, binImg, vecIT, refPtInfo, imgInfo, nFormMatch, vecIndex);
+	}	
+
+	/// <关键字粗匹配>
+	/// <原先的处理策略是一次进行多尺度匹配，这样容易导致多尺度下的无匹配>
+	/// <准备修改为单尺度多次匹配，逐次增加尺度，这样一方面降低计算量，一方面可以提升精度，减少后处理>
+	if (vecIndex.size() > 1 && strategy.index[4].bSelected) {
+		icvAutoClassifyBasedKeyword(ocrHandle, binImg, vecIT, refPtInfo, vecIndex, ICV_KEY_COARSE);			
+	}
+
+	/// <关键字细匹配>
+	if (vecIndex.size() > 1 && strategy.index[4].bSelected) {
+		vecTempIndex = vecIndex;
+		icvAutoClassifyBasedKeyword(ocrHandle, binImg, vecIT, refPtInfo, vecIndex, ICV_KEY_FINE);			
+		if (vecIndex.size() == 0) {	/// <关键字细分类无法区分则返回原始粗分类结果>
+			vecIndex = vecTempIndex;
+		}
+	}
+
+	/// <LOGO匹配>
+	if (strategy.index[3].bSelected && vecIndex.size() > 1) {
+		vecTempIndex = vecIndex;
+		icvAutoClassifyBasedLOGO(binImg, vecIT, vecIndex);
+		if (vecIndex.size() == 0) {
+			vecIndex = vecTempIndex;
+		}
+	}
+
+	/// <固定区域颜色特征细匹配>
+	/// <目前设定是固定区域的红色检测>
+	/// <后续可以设置其他颜色检测：比如绿色、蓝色等不同于黑白灰的颜色>
+	vecTempIndex = vecIndex;
+	if (strategy.index[5].bSelected && strategy.index[5].type == FtrType::ICV_MT_COLOR) {
+		icvAutoClassifyBasedLocalColor(colorHandle, colorImg, vecIT, vecIndex);
+	}
+	if (vecIndex.size() == 0) {
+		vecIndex = vecTempIndex;
+	}
+	
+	/// <经Size、Form、Keyword匹配后仍无法分类的图像后处理>
+	/// <税务登记证-国税和地税的区分。两者的区别在于是否存在红色印章>
+	/// <代理身份证核查与身份证核查之间的判别，根据有无红色区域判断>
+	/// <通用凭证1和通用凭证2的特殊处理，两种通用凭证极为相似，根据大小和关键字无法区分>
+	if (vecIndex.size() == 2) {
+		if ((vecIndex[0] == nAgentIdCheck && vecIndex[1] == nIdCheck) || (vecIndex[0] == nIdCheck && vecIndex[1] == nAgentIdCheck)) {
+			icvAutoClassifyRedRegion(colorImg, vecIT, vecIndex, nAgentIdCheck, nIdCheck);
+		} else if ((vecIndex[0] == nStateTax && vecIndex[1] == nLandTax) || (vecIndex[0] == nLandTax && vecIndex[1] == nStateTax)) {
+			icvAutoClassifyRedRegion(colorImg, vecIT, vecIndex, nStateTax, nLandTax);
+		}
+	}
+
+	return 1;
+}
+
+/// <文档图像分类引擎释放>
+void icvAutoClassify_uninit(long& handle) {
+	if (handle > 0) {
+		docImgClassifyEngine* engine = (docImgClassifyEngine*)handle;
+		engine->vecIT.clear();
+		engine->strategy.vecTemplates.clear();
+		if (engine->idHandle > 0) {
+			icvIdCard_uninit(engine->idHandle);		engine->idHandle = 0;
+		}
+		if (engine->ocrHandle > 0) {
+			icvAutoClassifyKeyword_uninit(engine->ocrHandle);	engine->ocrHandle = 0;
+		}
+		if (engine->colorHandle) {
+			icvColor_UnInit(engine->colorHandle);	engine->colorHandle = 0;
+		}
+		delete engine;	engine = NULL;
+	}
+
+	handle = 0;
+}
+
+string icvAutoClassify_formatOutput_XML(long handle, int idx) {
+	docImgClassifyEngine* engine = (docImgClassifyEngine*)handle;
+	GlobalDICStrategy strategy = engine->strategy;
+
+	if (idx < 0 || idx >= strategy.vecTemplates.size()) {
+		return "";
+	}
+
+	stringstream ss;
+	ss << "<?xml version=\"1.0\" encoding=\"GB2312\" ?>" <<endl;
+	ss << "<Result>" <<endl;
+	ss << "\t<";
+	ss << "ClassType TemplateName=\"" << strategy.vecTemplates[idx].strTepName << "\" ";
+	ss << "Cod=\"" << strategy.vecTemplates[idx].strTepId << "\" ";
+	ss << "TemplateType=\"" << strategy.vecTemplates[idx].strTepType << "\" ";
+	ss << "SystemCode=\"" << strategy.vecTemplates[idx].strSysCode << "\" ";
+	ss << "/>" << endl;
+	ss << "</Result>"<<endl;
+
+	return ss.str();
+}
+
+string icvAutoClassify_formatOutput_Json(long handle, int idx) {
+	docImgClassifyEngine* engine = (docImgClassifyEngine*)handle;
+	GlobalDICStrategy strategy = engine->strategy;
+
+	if (idx < 0 || idx >= strategy.vecTemplates.size()) {
+		return "";
+	}
+
+	stringstream ss;
+	ss << "{";
+	ss << "\"ClassType TemplateName\": \"" << strategy.vecTemplates[idx].strTepName << "\",";
+	ss << "\"Code\": \"" <<strategy.vecTemplates[idx].strTepId << "\",";
+	ss << "\"TemplateType\": \"" << strategy.vecTemplates[idx].strTepType << "\",";
+	ss << "\"SystemCode\": \"" <<strategy.vecTemplates[idx].strSysCode << "\"";
+	ss << "}";
+
+	return ss.str();
+}
+
+/// <输出当前自动分类算法版本>
+string icvAutoClassify_getVersionInfo() {
+	stringstream ss;
+	ss << "\n----------Information About Auto Classification Algorithm(ACA)----------" <<endl;
+	ss << "ACA Author  : " << ACA_AUTHOR << endl;
+	ss << "ACA TIME    : " << ACA_TIME <<endl;
+	ss << "ACA VERSION : " << ACA_VERSION <<endl;
+	return ss.str();
+}
+
+/// <基于图像路径的自动分类接口>
+int icvAutoClassify_form(long handle, const char* path, const int* pcCandiList, int nCandiList, char* result) {
+	Mat colorImg = imread(path, CV_LOAD_IMAGE_COLOR);
+	if (colorImg.empty()) {
+		return -1;
+	}
+	
+	vector<int>vecIndex;
+	if (pcCandiList == NULL || nCandiList <= 0) {
+		vecIndex.clear();
+	} else {
+		vecIndex.resize(nCandiList);
+		memcpy(vecIndex.data(), pcCandiList, sizeof(int) * nCandiList);
+	}
+
+	/// <将300DPI的图像归一化到200DPI>
+#ifdef USE_NORM_DPI_200
+	ImgInfo info = icvLoadImageInfoFrmPath(path);
+	if (info.nDpi == 300) {
+		resize(colorImg, colorImg, Size(colorImg.cols * 0.667, colorImg.rows * 0.667));
+	}
+#endif
+
+	int nRet = icvAutoClassify_form(handle, colorImg, vecIndex);
+	if (nRet <= 0 || vecIndex.size() == 0) {
+		return -1;
+	} else {
+		string out = icvAutoClassify_formatOutput_XML(handle, vecIndex[0]);
+		memcpy(result, out.c_str(), out.size());
+		return 1;
+	}
+}
+
+
+/// <基于数据流的自动分类接口>
+int icvAutoClassify_form(long handle, const char* data, int len, const int* pcCandiList, int nCandiList, char* result) {
+	if (handle <= 0 || data == NULL) {
+		return -1;
+	}
+	vector<uchar> buffer;
+	buffer.resize(len);
+	memcpy(buffer.data(), data, len);
+	
+	Mat colorImg = imdecode(buffer, CV_LOAD_IMAGE_COLOR);
+	if (colorImg.empty()) {
+		return -1;
+	}
+
+	vector<int>vecIndex;
+	if (pcCandiList == NULL || nCandiList <= 0) {
+		vecIndex.clear();
+	} else {
+		vecIndex.resize(nCandiList);
+		memcpy(vecIndex.data(), pcCandiList, sizeof(int) * nCandiList);
+	}
+
+	/// <将300DPI的图像归一化到200DPI>
+
+#ifdef USE_NORM_DPI_200
+	ImgInfo info = icvLoadImageInfoFrmData((char*)data, len);
+	if (info.nDpi == 300) {
+		resize(colorImg, colorImg, Size(colorImg.cols * 0.667, colorImg.rows * 0.667));
+	}
+#endif
+
+	int nRet = icvAutoClassify_form(handle, colorImg, vecIndex);
+	if (nRet <= 0 || vecIndex.size() == 0) {
+		return -1;
+	} else {
+		string out = icvAutoClassify_formatOutput_Json(handle, vecIndex[0]);
+		memcpy(result, out.c_str(), out.size());
+		return vecIndex.size();
+	}
+}
+

@@ -1,0 +1,652 @@
+#include "stdafx.h"
+#include "icvCalcFormFtr.h"
+
+/// <暂时不要采用新版直线检测算法，原有后处理机制与新版直线检测算法存在一些不兼容性问题>
+//#define LINE_DETECTION_NEW
+#ifdef LINE_DETECTION_NEW
+#include "libLineDetectionAndRemove.h"
+#else
+#include "libDefination_249.h"
+#endif
+
+
+/// <直线检测，主要是水平线和垂直线的检测，以及二维码的检测。>
+bool LineDetection(const Mat inputImage, 
+				   std::vector<std::vector<float>>& lineHs,
+				   std::vector<std::vector<float>>& lineVs, 
+				   std::vector<std::vector<float>>& barcodelines,
+				   cv::Mat &removedimImage, 
+				   bool isRemove) {	
+#ifdef LINE_DETECTION_NEW
+	Mat lineMaskImg;
+	bool bRet = icvLineDetectionAndRemove_curveLine_lineInfo(inputImage, lineHs, lineVs, lineMaskImg, removedimImage, isRemove);
+	return bRet;
+
+#else
+	vector<vector<float>> liness;
+	if (inputImage.cols < 2000 && (inputImage.cols < 1000 || inputImage.rows < 1000)) {
+		if (LineDetectionWithLengthParamOfRemoval(inputImage, liness, 40, 1500, 1500, removedimImage, isRemove)) {
+			for (int i=0;i<liness.size();i++) {
+				if (liness[i][5]<100 && liness[i][0] == 0) {
+					barcodelines.push_back(liness[i]);
+				}
+			}
+		}
+	}
+	
+	liness.clear();
+	if(LineDetectionWithRunGapParam(inputImage, liness, 5, 5, removedimImage, isRemove)) {
+
+		for (int i = 0; i < liness.size(); i++) {
+			if ( liness[i][0]) {
+				lineHs.push_back(liness[i]);
+			} else {
+				if (inputImage.cols > 2000) {
+					if (liness[i][5] < 200 && liness[i][2]<inputImage.rows/2 && liness[i][1]<inputImage.cols/2) {
+						barcodelines.push_back(liness[i]);
+					}
+				}
+				lineVs.push_back(liness[i]);
+			}
+		}
+
+		return true;
+	}
+	return false;
+#endif
+	
+}
+
+int findframelinerd(Mat Image,vector<vector<float>> lineHs,vector<vector<float>> lineVs,vector<vector<float>>& formHFs,vector<vector<float>>& formVFs) {
+	int hsize = lineHs.size();
+	int vsize = lineVs.size();
+
+	////右边框
+	int iv=0;
+	for (iv=vsize-1;iv>0;iv--) {
+		if (abs(lineVs[iv][1]-formHFs[0][3])<20 && abs(lineVs[iv][2]-formHFs[0][4])<20) {
+			formVFs.push_back(lineVs[iv]);
+			break;
+		}
+	}
+
+	if (iv==0) {
+		for (int iv=vsize-1;iv>0;iv--) {
+			for (int ih=hsize-1;ih>0;ih--) {
+				if (lineHs[ih][5]<150) {
+					continue;
+				}
+				if (lineHs[ih][5]>100&& lineVs[iv][5]>70&&lineHs[ih][2]>formHFs[0][2]+20 && abs(lineHs[ih][3]-lineVs[iv][3])<20 && abs(lineHs[ih][4]-lineVs[iv][4])<20) {
+					if (abs(lineHs[ih][0]-formHFs[0][0])<0.03 && abs(lineVs[iv][0]-formVFs[0][0])<0.03 &&(abs(lineVs[iv][1]-formHFs[0][3])<20 || abs(lineVs[iv][2]-formHFs[0][4])<20)&& (abs(lineHs[ih][1]-formVFs[0][3])<20||abs(lineHs[ih][2]-formVFs[0][4])<20)) {
+						formVFs.push_back(lineVs[iv]);
+						formHFs.push_back(lineHs[ih]);
+						break;
+					}
+				}
+			}
+		}
+	} else {
+		int ih =0;
+		for (ih=hsize-1;ih>0;ih--) {
+			if (lineHs[ih][5]<150) {
+				continue;
+			}
+			if ((abs(lineHs[ih][3]-formVFs[1][3])<10|| abs(lineHs[ih][1]-formVFs[0][3])<10)&& (abs(lineHs[ih][4]-formVFs[1][4])<10||abs(lineHs[ih][2]-formVFs[0][4])<10)) {
+				formHFs.push_back(lineHs[ih]);
+				break;
+			}
+		}
+		if (ih==0) {
+			if (abs(formVFs[0][4] - formVFs[1][4])<15) {
+				vector<float> formh;
+				for (ih=hsize-1;ih>0;ih--) {
+					if (lineHs[ih][5]<150) {
+						continue;
+					}
+					if ((abs(lineHs[ih][4]-formVFs[1][4])<10&&abs(lineHs[ih][2]-formVFs[0][4])<10)) {
+						formh.push_back(formHFs[0][0]);
+						formh.push_back(formVFs[0][3]);
+						formh.push_back(formVFs[0][4]);
+						formh.push_back(formVFs[1][3]);
+						formh.push_back(formVFs[1][4]);
+						formh.push_back(formHFs[0][5]);
+						formh.push_back(formHFs[0][6]);
+						formh.push_back(formHFs[0][7]);
+						formHFs.push_back(formh);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if (formHFs.size()<2||formVFs.size()<2) {
+		return -1;
+	}
+
+	return 1;
+}
+
+double Cross(const Point& p1,const Point& p2,const Point& p3,const Point& p4) {  
+	return (p2.x-p1.x)*(p4.y-p3.y) - (p2.y-p1.y)*(p4.x-p3.x);  
+}  
+
+double Area(const Point& p1,const Point& p2,const Point& p3) {  
+	return Cross(p1,p2,p1,p3);  
+}  
+
+double fArea(const Point& p1,const Point& p2,const Point& p3) {
+	return fabs(Area(p1,p2,p3));  
+}  
+
+Point InterSecPoint(Point p1,Point p2,Point p3,Point p4) {
+	double k = fArea(p1,p2,p3) / fArea(p1,p2,p4);
+	return Point((p3.x + k*p4.x)/(1+k),(p3.y + k*p4.y)/(1+k));
+}
+
+int findframeliner(Mat Image,vector<vector<float>> lineHs,vector<vector<float>> lineVs,vector<vector<float>>& lineHFs,vector<vector<float>>& lineVFs) {
+	vector<vector<vector<float>>> formHFs;
+	vector<vector<vector<float>>> formVFs;
+	////上边框 和右边框
+	int isbreak =0;
+	int hsize = lineHs.size();
+	int vsize = lineVs.size();
+	for (int iv=vsize-1;iv>=0;iv--) {		
+		for (int ih=0;ih<hsize;ih++) {
+			if (lineHs[ih][5]+lineVs[iv][5]<400) {
+				continue;
+			}
+			if (lineHs[ih][5]>100&& lineVs[iv][5]>70&& abs(lineHs[ih][3]-lineVs[iv][1])<20 && abs(lineHs[ih][4]-lineVs[iv][2])<20) {
+				isbreak =1;
+				if (formHFs.size()>0) {
+					for (int j =0;j<formHFs.size();j++) {
+						if (lineHs[ih][5]<formHFs[j][0][5] && lineVs[iv][5]<formVFs[j][0][5] && lineHs[ih][3]>formHFs[j][0][3]) {
+							isbreak =0;
+							break;
+						} else if (lineHs[ih][5]>formHFs[j][0][5] && lineVs[iv][5]>formVFs[j][0][5] && lineHs[ih][3]<formHFs[j][0][3]) {
+							formHFs.erase(formHFs.begin()+j);
+							formVFs.erase(formVFs.begin()+j);
+							j--;
+						}
+					}
+				}
+				if (isbreak<1) {
+					break;
+				}
+				lineHFs.push_back(lineHs[ih]);
+				lineVFs.push_back(lineVs[iv]);
+				formHFs.push_back(lineHFs);
+				formVFs.push_back(lineVFs);
+				lineHFs.clear();
+				lineVFs.clear();
+				break;
+			}
+		}
+	}
+
+	if (formHFs.size()<1)
+		return -1;
+
+	if (formVFs.size()) {		
+		for (int i=0;i<formVFs.size();i++) {
+			for (int ih=hsize-1;ih>0;ih--) {
+				if (abs(lineHs[ih][3]-formVFs[i][0][3])+ abs(lineHs[ih][4]-formVFs[i][0][4])<55) {
+					formHFs[i].push_back(lineHs[ih]);
+					break;
+				}
+			}
+		}
+	}
+
+	for (int i=0;i<formHFs.size();i++) {		
+		if (formHFs[i].size()<2) {
+			formHFs.erase(formHFs.begin()+i);
+			formVFs.erase(formVFs.begin()+i);
+			i--;
+		}
+	}
+
+	if (formHFs.size()<1) {
+		return -1;
+	}
+
+	////还差左边框
+	for (int i=0;i<formHFs.size();i++) {
+		int iv=0;
+		for (iv=0;iv<vsize;iv++) {
+			if (abs(lineVs[iv][3]-formHFs[i][1][1])<20 && abs(lineVs[iv][4]-formHFs[i][1][2])<20) {
+				formVFs[i].insert(formVFs[i].begin(),lineVs[iv]);
+				break;
+			}
+		}
+		if (iv==vsize) {
+			if (abs(formHFs[i][0][1] - formHFs[i][1][1])<30 && formHFs[i][0][1]<Image.cols*0.25) {
+				vector<float> linev;
+				linev.push_back(formVFs[i][0][0]);
+				linev.push_back(formHFs[i][0][1]);
+				linev.push_back(formHFs[i][0][2]);
+				linev.push_back(formHFs[i][1][1]);
+				linev.push_back(formHFs[i][1][2]);
+				linev.push_back(formVFs[i][0][5]);
+				linev.push_back(formVFs[i][0][6]);
+				linev.push_back(formVFs[i][0][7]);
+				formVFs[i].insert(formVFs[i].begin(),linev);
+			} else {
+				formHFs.erase(formHFs.begin()+i);
+				formVFs.erase(formVFs.begin()+i);
+				i--;
+			}
+		}
+	}
+
+	if (formHFs.size()<1||formVFs.size()<1) {
+		return -1;
+	}
+
+	for (int i=0;i<formHFs.size();i++) {
+		for (int j=0;j<2;j++) {
+			lineHFs.push_back(formHFs[i][j]);
+			lineVFs.push_back(formVFs[i][j]);
+		}
+	}
+
+	return 0;
+}
+
+int findframeline(Mat Image,vector<vector<float>> lineHs,vector<vector<float>> lineVs,vector<vector<float>>& lineHFs,vector<vector<float>>& lineVFs,Point2f& referPoint) {	
+	if (lineHs.size()>2) {
+		if (lineHs[0][2]<10 && lineHs[0][4]<10)
+			lineHs.erase(lineHs.begin());
+	}
+
+	int hsize = lineHs.size();
+	int vsize = lineVs.size();
+
+	/// <水平垂直线条不足，无法形成表格边界>
+	if (hsize<2 ||  vsize<2) {
+		if((float)Image.rows/(float)Image.cols>2.8 && hsize == 2 && vsize == 1) {	//若是账户资料且检测到两条横线一条竖线，计算交点
+			if(hsize == 2&&vsize == 1) {
+				if(lineHs[0][1]<10&&lineHs[1][1]<10) {								//账户资料左边线不存在
+					if(lineHs[0][2]<lineHs[1][2])
+						referPoint = Point2f(0,lineHs[0][2]);
+					else
+						referPoint = Point2f(0,lineHs[1][2]);
+				}
+				else if(lineHs[0][3]<Image.cols-10&&lineHs[1][3]<Image.cols-10) {//账户资料右边线不存在
+					if(lineHs[0][2]<lineHs[1][2])	//计算上边线和左边线的交点，并将这个点设为参考点
+						referPoint = InterSecPoint(Point(lineHs[0][1],lineHs[0][2]),Point(lineHs[0][3],lineHs[0][4]), Point(lineVs[0][1],lineVs[0][2]),Point(lineVs[0][3],lineVs[0][4]));
+					else
+						referPoint = InterSecPoint(Point(lineHs[1][1],lineHs[1][2]),Point(lineHs[1][3],lineHs[1][4]), Point(lineVs[0][1],lineVs[0][2]),Point(lineVs[0][3],lineVs[0][4]));
+				}
+			}
+		}
+		return -1;
+	}
+
+	vector<vector<vector<float>>> formHFs;
+	vector<vector<vector<float>>> formVFs;
+	////上边框 和左边框
+	int isbreak =0;
+	for (int iv=0;iv<vsize;iv++) {
+		for (int ih=0;ih<hsize;ih++) {
+			if (lineHs[ih][5]+lineVs[iv][5]<400) {
+				continue;
+			}
+			if (lineHs[ih][5]>100 && lineVs[iv][5]>70 && abs(lineHs[ih][1]-lineVs[iv][1]) < 20 && abs(lineHs[ih][2]-lineVs[iv][2]) < 20) {
+				lineHFs.push_back(lineHs[ih]);
+				lineVFs.push_back(lineVs[iv]);
+				formHFs.push_back(lineHFs);
+				formVFs.push_back(lineVFs);
+				lineHFs.clear();
+				lineVFs.clear();
+				break;
+			}
+		}
+	}
+
+	if (formHFs.size()<1) {
+		return findframeliner(Image,lineHs,lineVs,lineHFs,lineVFs);
+	}
+
+	/// <下边框,依赖左边框寻找下边框>
+	/// <依赖于左边框的下坐标> 
+	if (formVFs.size()) {		
+		for (int i=0;i<formVFs.size();i++) {
+			int ih= 0;
+			for (ih=hsize-1;ih>0;ih--) {
+				if (abs(lineHs[ih][2]-formVFs[i][0][4])>55) {
+					continue;
+				}				
+				if (abs(lineHs[ih][1]-formVFs[i][0][3])+ abs(lineHs[ih][2]-formVFs[i][0][4])<15 && abs(lineHs[ih][1]-formVFs[i][0][3])<formVFs[i][0][5]*0.2) {
+					formHFs[i].push_back(lineHs[ih]);
+					break;
+				}
+			}
+
+			/// 如果找不到，则放宽阈值重新寻找
+			if (ih==0) {
+				for (ih=hsize-1;ih>0;ih--) {
+					if (abs(lineHs[ih][2]-formVFs[i][0][4])>55) {
+						continue;
+					}					
+					if (abs(lineHs[ih][1]-formVFs[i][0][3])+ abs(lineHs[ih][2]-formVFs[i][0][4])<55 && abs(lineHs[ih][1]-formVFs[i][0][3])<formVFs[i][0][5]*0.2) {
+						formHFs[i].push_back(lineHs[ih]);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	for (int i=0;i<formHFs.size();i++) {		
+		if (formHFs[i].size()<2) {			
+			if (findframelinerd(Image,lineHs,lineVs,formHFs[i],formVFs[i])>0) { //如果找到四个边框
+				for (int j=0;j<2;j++) {
+					lineHFs.push_back(formHFs[i][j]);
+					lineVFs.push_back(formVFs[i][j]);
+				}				
+			}			
+			formHFs.erase(formHFs.begin()+i);
+			formVFs.erase(formVFs.begin()+i);
+			i--;
+		}
+	}
+
+	if (formHFs.size()<1) {
+		if (lineHFs.size()<2)
+			return -1;
+		else 
+			return 1;
+	}
+
+	///找右边框
+	for (int i=0;i<formHFs.size();i++) {
+		int iv =0;
+		for (iv=vsize-1;iv>0;iv--) {			
+			if (lineVs[iv][5]<0.33*formHFs[i][0][5]) {
+				continue;
+			}
+			if ((abs(lineVs[iv][1]-formHFs[i][0][3])<20 && abs(lineVs[iv][2]-formHFs[i][0][4])<20) || (abs(lineVs[iv][3]-formHFs[i][1][3])<20 && abs(lineVs[iv][4]-formHFs[i][1][4])<20)) {				
+				formVFs[i].push_back(lineVs[iv]);
+				break;
+			}
+		}
+		if (iv==0) {
+			if (abs(formHFs[i][0][3] - formHFs[i][1][3])<10) {
+				for (iv=vsize-1;iv>0;iv--) {
+					if (formVFs.size()) {
+						if (lineVs[iv][5]<0.33*formVFs[0][0][5]) {
+							continue;
+						}
+					}
+
+					if (abs(lineVs[iv][1]-formHFs[i][0][3])<20 && abs(lineVs[iv][3]-formHFs[i][1][3])<20 ) {
+						formVFs[i].push_back(lineVs[iv]);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	for (int i=0;i<formHFs.size();i++) {
+		if (formVFs[i].size()<2) {
+			int iv=0;
+			for (iv=vsize-1;iv>0;iv--) {
+				if (lineVs[iv][5]<formVFs[i][0][5]*0.3) {
+					continue;
+				}
+				if (abs(lineVs[iv][3]-formHFs[i][1][3])<20 && abs(lineVs[iv][4]-formHFs[i][1][4])<20) {
+					formVFs[i].push_back(lineVs[iv]);
+					break;
+				}
+			}
+
+			if (iv==0 ) {
+				if(formHFs[i].size()==2)
+					formHFs[i].pop_back();
+
+				if (findframelinerd(Image,lineHs,lineVs,formHFs[i],formVFs[i])>0) {	//如果找到四个边框
+					for (int j=0;j<2;j++) {
+						lineHFs.push_back(formHFs[i][j]);
+						lineVFs.push_back(formVFs[i][j]);
+					}
+				}
+				formHFs.erase(formHFs.begin()+i);
+				formVFs.erase(formVFs.begin()+i);
+				i--;				
+			}
+		} else {
+			for (int ih=hsize-1;ih>0;ih--) {
+				if (abs(lineHs[ih][3]-formVFs[i][1][3])+ abs(lineHs[ih][4]-formVFs[i][1][4])<55) {
+					formHFs[i].push_back(lineHs[ih]);
+					break;
+				}
+			}
+		}
+	}
+
+	for (int i=0;i<formHFs.size();i++) {
+		if (formVFs[i].size()<2 || formHFs[i].size()<2) {
+			formHFs.erase(formHFs.begin()+i);
+			formVFs.erase(formVFs.begin()+i);
+			i--;
+		}
+	}
+
+	if (formHFs.size()<1||formVFs.size()<1) {
+		if (lineHFs.size()<2)
+			return -1;
+		else 
+			return 1;
+	}
+
+	for (int i=0;i<formHFs.size();i++) {
+		for (int j=0;j<2;j++) {
+			lineHFs.push_back(formHFs[i][j]);
+			lineVFs.push_back(formVFs[i][j]);
+		}	
+	}
+
+	return 1;
+}
+
+///////////////查找四条外边框交点/////
+int findintersectionpoit(const vector<float> lineNHs,const vector<float> lineNVs,_Out_ Point2f &P) {
+	if (lineNHs.size()<5 || lineNVs.size()<5) {
+		return 0;
+	}
+
+	float a1 =0,b1=0,a2=0,b2=0;
+	if (lineNHs[3] -lineNHs[1]) {
+		a1 = (lineNHs[4] -lineNHs[2])/(lineNHs[3] -lineNHs[1]);
+	} else {
+		return 0;
+	}
+
+	b1 = (float)lineNHs[4] - a1 * lineNHs[3];
+	if (lineNVs[3] -lineNVs[1]) {
+		a2 = (lineNVs[4] -lineNVs[2])/(lineNVs[3] -lineNVs[1]);
+		b2 = lineNVs[4] - a2 * lineNVs[3];
+		if (a2 == a1) {
+			return 0;
+		}
+		P.x = -(b2 - b1)/(a2 - a1);
+		P.y = P.x * a1 + b1;
+	} else {
+		b2 = -lineNVs[3];
+		P.x = -b2;
+		P.y = P.x*a1 + b1;	
+	}
+
+	if (P.y<0 ||P.x<0 ) {
+		return 0;
+	}
+	return 1;
+}
+
+/// 检测表格同时定位四个角点
+int icvCalcFormInfo(Mat& Image, vector<vector<float>>& barcodelines, vector<FormInfo>& CFromIfos, Point2f& ReferPoint, float& sinA) {
+	sinA = 0;
+	ReferPoint.x =0;
+	ReferPoint.y =0;
+
+	vector<vector<float>> lineHs;
+	vector<vector<float>> lineVs;
+
+	int icols = Image.cols;
+	int irows = Image.rows;
+	Mat removeImage;
+
+	/// <直线检测（包括断线连接）>
+	if (LineDetection(Image, lineHs, lineVs, barcodelines, removeImage, true)) {
+		vector<vector<float>> lineHFs;
+		vector<vector<float>> lineVFs;
+		Image = removeImage.clone();
+
+//#define SHOW_LINE
+#ifdef SHOW_LINE	
+		vector<Scalar> colorSet;
+		colorSet.push_back(Scalar(0,0,255));
+		colorSet.push_back(Scalar(0,255,0));
+		colorSet.push_back(Scalar(255,0,0));
+		colorSet.push_back(Scalar(255,0,255));
+
+		Mat colorRI = Mat::zeros(Image.rows, Image.cols, CV_8UC3);
+
+		for (int l=0;l<lineHs.size();l++) {
+			line(colorRI,Point(lineHs[l][1],lineHs[l][2]),Point(lineHs[l][3],lineHs[l][4]),colorSet[l % 4],3);
+		}
+		for (int l=0;l<lineVs.size();l++) {
+			line(colorRI,Point(lineVs[l][1],lineVs[l][2]),Point(lineVs[l][3],lineVs[l][4]),colorSet[l % 4],3);
+		}		
+#endif
+		
+		/// <查找四条外边框,如果查找失败则直接返回>
+		if (findframeline(Image, lineHs, lineVs, lineHFs, lineVFs, ReferPoint) < 0) {
+			return -1;
+		}
+
+		/// <横线或竖线过少则返回检测失败>
+		if (lineHFs.size() < 2 || lineVFs.size() < 2) {
+			if (lineHs.size() > 0) {
+				if ((lineHs[0][2] < irows * 0.3) && (lineHs[0][5] > irows * 0.3)) {
+					ReferPoint.y = lineHs[0][2];
+				}
+			}
+			if (lineVs.size() > 0 ) {
+				if (lineVs[0][2] < icols * 0.25 && lineVs[0][5] < icols * 0.3) {
+					ReferPoint.x =lineVs[0][2];
+				}
+			}
+			return -1;
+		}
+
+		/// <>
+		for (int i = 0; i < lineHFs.size() / 2; i++) {
+			if(lineHFs[i * 2 + 1].size() < 8 || lineHFs[i * 2 + 0].size() < 8|| lineVFs[i * 2 + 1].size() < 8 || lineVFs[i * 2 + 0].size() < 8)
+				return -1;
+			/// <两条水平/垂直线之间的差异估计>
+			/// <1 倾斜角度小于一定阈值>
+			/// <2 起止点差异小于一定阈值>
+			float fAngThr = 0.5;	/// <原始值为0.06，值过小，导致新版直线检测算法所得被过滤>
+			if ((abs(lineHFs[i * 2 + 1][7] - lineHFs[i * 2 + 0][7]) > fAngThr)
+				|| (abs(lineVFs[i * 2 + 1][7] - lineVFs[i * 2 + 0][7]) > fAngThr)
+				|| (abs(lineVFs[i * 2 + 1][1] - lineVFs[i * 2 + 0][1]) < icols / 3 && abs(lineHFs[i * 2 + 1][2] - lineHFs[i * 2 + 0][2]) < irows / 3)) {
+				lineHFs.erase((lineHFs.begin() + i * 2));
+				lineHFs.erase((lineHFs.begin() + i * 2));
+				lineVFs.erase((lineVFs.begin() + i * 2));
+				lineVFs.erase((lineVFs.begin() + i * 2));
+				i--;
+				continue;
+			}
+
+			/// <边框的四端点>
+			Point2f plefup   = Point(0, 0);
+			Point2f pledwon  = Point(0, 0);
+			Point2f prigup   = Point(0, 0);
+			Point2f prigdwon = Point(0, 0); 
+
+			if (!findintersectionpoit(lineHFs[i * 2 + 0], lineVFs[i * 2 + 0], plefup))		return -1; 
+			if (!findintersectionpoit(lineHFs[i * 2 + 0], lineVFs[i * 2 + 1], prigup))		return -1;			
+			if (!findintersectionpoit(lineHFs[i * 2 + 1], lineVFs[i * 2 + 0], pledwon))		return -1;
+			if (!findintersectionpoit(lineHFs[i * 2 + 1], lineVFs[i * 2 + 1], prigdwon))	return -1;
+
+			/// <四个角点异常>
+			if (plefup.x < 0 || plefup.y < 0 || prigup.x >= Image.cols || prigup.y < 0 ||
+				pledwon.x <0 || pledwon.y >= Image.rows || prigdwon.x >= Image.cols || prigdwon.y >= Image.rows) {
+				if (Image.rows > Image.cols * 2.6 && plefup.x > 0 && plefup.y > 0)
+					ReferPoint = plefup;						
+				return -1;
+			}
+						
+			//外边框长宽比例
+			FormInfo forminf;
+			forminf.FormRatio     = (prigup.x - plefup.x + prigdwon.x - pledwon.x) / (pledwon.y - plefup.y + prigdwon.y - prigup.y + 0.000001);
+			forminf.FormPoints[0] = plefup;
+			forminf.FormPoints[1] = prigup;
+			forminf.FormPoints[2] = pledwon;
+			forminf.FormPoints[3] = prigdwon;
+
+			if (CFromIfos.size() == 0) {
+				CFromIfos.push_back(forminf);
+				sinA = lineHFs[i][7];
+			} else {
+				if (CFromIfos.size()==2) {
+					continue;
+				}
+				if (CFromIfos[0].FormPoints[1].x == CFromIfos[0].FormPoints[0].x || CFromIfos[0].FormPoints[2].y == CFromIfos[0].FormPoints[0].y) {
+					continue;
+				}
+				float frameRatio = (forminf.FormPoints[1].x -forminf.FormPoints[0].x)*(forminf.FormPoints[2].y -forminf.FormPoints[0].y) /
+					((CFromIfos[0].FormPoints[1].x -CFromIfos[0].FormPoints[0].x) * (CFromIfos[0].FormPoints[2].y - CFromIfos[0].FormPoints[0].y));
+
+				if (frameRatio>0.97) {
+					if (frameRatio<1.03 && ((forminf.FormPoints[1].x<CFromIfos[0].FormPoints[1].x &&forminf.FormPoints[1].x<CFromIfos[0].FormPoints[0].x)
+						||(CFromIfos[0].FormPoints[1].x<forminf.FormPoints[0].x &&CFromIfos[0].FormPoints[1].x<forminf.FormPoints[1].x ))) {					
+					} else  {
+						CFromIfos.pop_back();
+					}
+					sinA =lineHFs[i][7];
+					CFromIfos.push_back(forminf);
+				} else {					
+					if (frameRatio>0.23 &&frameRatio<0.5 && (forminf.FormPoints[2].y -forminf.FormPoints[0].y) > 800
+						&&((int)forminf.FormPoints[0].x - CFromIfos[0].FormPoints[0].x  < 200 || (int)CFromIfos[0].FormPoints[1].x - forminf.FormPoints[1].x< 200)) {
+							CFromIfos.pop_back();
+							sinA =lineHFs[i][7];
+							CFromIfos.push_back(forminf);
+					} 			
+				}
+			}
+		}
+
+		if (CFromIfos.size()>0) {			
+			ReferPoint.y = CFromIfos[0].FormPoints[0].y;
+			ReferPoint.x = CFromIfos[0].FormPoints[0].x;
+			if (ReferPoint.y < 30 || ReferPoint.x < 30 && CFromIfos.size() == 1) {
+				Rect rbox = Rect(ReferPoint.x, ReferPoint.y, 30, 30);
+				if (rbox.x < 0 || rbox.y < 0 || rbox.br().y >= Image.rows ||  rbox.br().x > Image.cols) {
+					return -1;
+				}
+				int rectblackN = countNonZero(255 - Image(rbox));
+				if (rectblackN > 300) {
+					CFromIfos.pop_back();
+					ReferPoint.y = 0;
+					ReferPoint.x = 0;
+				}
+			}
+			if (CFromIfos.size() == 2)  {
+				CFromIfos.pop_back();
+			}			
+
+			return 1;
+		} else {
+			return -1;
+		}
+		
+	} else {
+		return -1;
+	}
+
+	return 1;
+}

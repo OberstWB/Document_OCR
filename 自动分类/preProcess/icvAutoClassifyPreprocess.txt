@@ -1,0 +1,163 @@
+#include "stdafx.h"
+#include "icvAutoClassifyPreprocess.h"
+
+/// <边界填充，防止扫描黑边导致分类错误>
+void BlackMarginRemove(Mat &grayImage, int iTh, int iWhiteValue) {
+	/// <上下填充>
+	for(int j = 0; j < grayImage.cols; j++) {
+		for (int i = 0; i < grayImage.rows; i++) {
+			uchar cValue = grayImage.at<uchar>(i, j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+
+		for (int i = grayImage.rows - 1; i >= 0; i--) {
+			uchar cValue = grayImage.at<uchar>(i,j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+	}
+
+	/// <左右填充>
+	for (int i = 0; i < grayImage.rows; i++) {
+		for (int j = 0; j < grayImage.cols; j++ ) {
+			uchar cValue = grayImage.at<uchar>(i,j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+
+		for (int j = grayImage.cols - 1; j >= 0; j-- ) {
+			uchar cValue = grayImage.at<uchar>(i,j);
+			if (cValue < iTh) {
+				grayImage.at<uchar>(i,j) = (uchar)iWhiteValue;
+			} else {
+				break;
+			}
+		}
+	}
+	return;
+}
+
+/// <颜色移除>
+void icvColorRemove(Mat colorImg, Mat& grayImg) {
+	if (colorImg.channels() == 1) {
+		grayImg = colorImg.clone();
+	}
+
+	Mat proPixelData = Mat::zeros(colorImg.size(),CV_8UC1);	
+	Mat mask = Mat::zeros(colorImg.rows, colorImg.cols, CV_8UC1);
+	for (int i = 0; i < colorImg.rows; i++) {
+		for (int j = 0; j < colorImg.cols; j++) {
+			Vec3b pix = colorImg.at<Vec3b>(i, j);
+			if (abs(pix[1] - pix[2] * 0.5 - pix[2] * 0.5) > 40) {
+				mask.at<uchar>(i, j) = 255;
+			}
+		}
+	}
+
+	for (int i = 0; i < colorImg.rows; i++) {
+		for (int j = 0; j < colorImg.cols; j++) {
+			Vec3b pix = colorImg.at<Vec3b>(i, j);
+			if (mask.at<uchar>(i, j)) {
+				proPixelData.at<uchar>(i, j) = pix[2];
+			} else {
+				proPixelData.at<uchar>(i, j) = 0.114 * pix[2] + 0.587 * pix[1] + 0.299 * pix[0];
+			}
+		}
+	}
+	grayImg = proPixelData.clone();
+}
+
+int getMeanStd(Mat src, Mat& matMeanImage, Mat& matStdImage, const int nWinWidth, const int nWinHeigh) {
+	if (src.empty()) {
+		return -1;
+	}
+
+	if (src.channels() > 1) {
+		Mat matGrayImage;
+		cvtColor(src,matGrayImage,CV_BGR2GRAY);
+		matGrayImage.assignTo(src);
+		matGrayImage.release();
+	}
+
+	Mat meanKernel = Mat::ones(nWinHeigh,nWinWidth,CV_64F)/(nWinHeigh*nWinWidth);
+	src.convertTo(src,CV_64F);
+	filter2D(src,matMeanImage,-1,meanKernel);	
+
+	Mat matSquareImage(src.size(),CV_64F);
+	pow(src,2,matSquareImage);
+
+	Mat matSquareMeanImage,matMeanSquareImage;
+	filter2D(matSquareImage,matSquareMeanImage,-1,meanKernel);	
+
+	pow(matMeanImage, 2, matMeanSquareImage);
+	pow(matSquareMeanImage - matMeanSquareImage, 0.5, matStdImage);
+
+	return 0;
+}
+
+bool Binarization_Sauvola(Mat matImage, Mat& matBW_image, const int nWindowWidth, const int nWindowHeight, const double k, const int nDivideR) {
+	if (matImage.channels() > 1) {
+		Mat matGrayImage;
+		cvtColor(matImage,matGrayImage,CV_BGR2GRAY);
+		matGrayImage.assignTo(matImage);
+		matGrayImage.release();
+	}
+
+	Mat matMeanImage(matImage.size(),CV_64F),matStdImage(matImage.size(),CV_64F);
+	getMeanStd(matImage,matMeanImage, matStdImage, nWindowWidth, nWindowHeight);
+
+	Mat matThresImage;
+	matThresImage = matMeanImage.mul((matStdImage / nDivideR - 1) * k + 1);
+	matThresImage.convertTo(matThresImage,matImage.type());
+	compare(matImage,matThresImage,matBW_image,CMP_GT);
+
+	return true;
+}
+
+/// <自动分类算法的预处理模块>
+/// <图像预处理-二值化、去色、方向纠正等>
+/// <输入彩色图像，输出灰度图像和灰度图像>
+bool icvAutoClassifyPreprocess(Mat colorImg, Mat& grayImg, Mat& bwImg) {
+	if (colorImg.empty()) {
+		return false;
+	}
+	Mat img = colorImg.clone();
+
+	/// DPI归一化到200
+	float dpi = 200;
+	if (dpi != 200) {
+		float ratio = 200/dpi;
+		int newHeight = img.rows * ratio;
+		int newWidth  = img.cols * ratio;
+		resize(img, img, Size(newWidth, newHeight));
+	}
+	if (img.channels() == 3) {
+		cvtColor(img, img, COLOR_BGR2GRAY);
+		//icvColorRemove(img, img);
+	}
+
+	BlackMarginRemove(img, 100, 255);
+	grayImg = img.clone();
+
+	/// 二值化
+	Mat otsuMat, adpMat;
+	threshold(img, otsuMat, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+	Binarization_Sauvola(img, otsuMat,9,9,0.1,128);
+	adaptiveThreshold(img, adpMat, 255, CV_ADAPTIVE_THRESH_MEAN_C,CV_THRESH_BINARY, 23, 10);
+
+	/// 两种二值化方法结果合并
+	bwImg = ~(~otsuMat & ~adpMat);
+	bwImg = 255 - bwImg;
+
+	return true;
+}
